@@ -50,12 +50,26 @@ namespace QNetZ
 
 			if (!packet.flags.Contains(QPacket.PACKETFLAG.FLAG_RELIABLE))
 				return true;
+
+			// A handler serves several peers and virtual streams. Keep pending
+			// packets with the transport object and the complete incoming stream.
+			var key = (client, packet.m_uiSignature, packet.m_bySessionID,
+				packet.m_oSourceVPort?.toByte(), packet.m_oDestinationVPort?.toByte());
+			if (!FragmentBuffers.TryGetValue(key, out var accumulated))
+			{
+				accumulated = new List<QPacket>();
+				FragmentBuffers.Add(key, accumulated);
+			}
 			Trace("fragment.receive", client, packet, details: () => new
 			{
-				buffer = AccumulatedPackets.Select(x => new { signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber }).ToArray()
+				buffer_scope = "connection_session_stream", pending_streams = FragmentBuffers.Count,
+				buffer = accumulated.Select(x => new {
+					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
+					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
+				}).ToArray()
 			});
 
-			if (!AccumulatedPackets.Any(x =>
+			if (!accumulated.Any(x =>
 				 x.uiSeqId == packet.uiSeqId &&
 				 x.checkSum == packet.checkSum &&
 				 x.m_byPartNumber == packet.m_byPartNumber &&
@@ -64,7 +78,7 @@ namespace QNetZ
 				 x.m_uiSignature == packet.m_uiSignature
 				))
 			{
-				AccumulatedPackets.Add(packet);
+				accumulated.Add(packet);
 			}
 
 			if (packet.m_byPartNumber != 0)
@@ -75,7 +89,7 @@ namespace QNetZ
 			}
 
 			// got last fragment, assemble
-			var orderedFragments = AccumulatedPackets.OrderBy(x => x.uiSeqId);
+			var orderedFragments = accumulated.OrderBy(x => x.uiSeqId);
 			int numPackets = 0;
 			foreach (var fragPacket in orderedFragments)
 			{
@@ -87,12 +101,16 @@ namespace QNetZ
 			var fragments = orderedFragments.Take(numPackets).ToArray();
 			Trace("fragment.selection", client, packet, details: () => new
 			{
-				selected = fragments.Select(x => new { signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber }).ToArray(),
-				cleared_count = AccumulatedPackets.Count
+				selected = fragments.Select(x => new {
+					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
+					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
+				}).ToArray(),
+				cleared_count = accumulated.Count, retained_streams = FragmentBuffers.Count - 1
 			});
 
-			// remove fragments that we processed
-			AccumulatedPackets.Clear();//RemoveAll(x => fragments.Contains(x));
+			// Preserve the existing within-stream clearing/validation behavior,
+			// including rejection, without discarding another peer or stream.
+			FragmentBuffers.Remove(key);
 
 			if (numPackets > 1)
 			{
@@ -148,6 +166,20 @@ namespace QNetZ
 
 			Trace("fragment.complete", client, packet, details: () => new { fragments = numPackets });
 			return true;
+		}
+
+		private void DropFragmentBuffers(QClient client, string reason)
+		{
+			foreach (var key in FragmentBuffers.Keys.Where(key => ReferenceEquals(key.Owner, client)).ToArray())
+			{
+				Trace("fragment.drop", client, details: () => new
+				{
+					reason, signature = key.Signature, session = key.Session,
+					source_vport = key.Source, destination_vport = key.Destination,
+					pending = FragmentBuffers[key].Count
+				});
+				FragmentBuffers.Remove(key);
+			}
 		}
 
 		// acknowledges packet

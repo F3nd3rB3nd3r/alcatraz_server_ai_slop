@@ -64,6 +64,8 @@ Check("nat-probe-alternate-then-observed-control", false, () => NatProbeLookup("
 Check("nat-probe-unknown-target-control", false, () => NatProbeLookup("unknown"));
 foreach (var (kind, originalViolation) in NatProbeChecks.Cases)
     Check("nat-probe-" + kind, originalViolation, () => NatProbeChecks.Run(kind));
+foreach (var (kind, originalViolation) in FragmentIsolationChecks.Cases)
+    Check("fragment-" + kind, originalViolation, () => FragmentIsolationChecks.Run(kind));
 if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");

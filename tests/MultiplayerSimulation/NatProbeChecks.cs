@@ -213,13 +213,13 @@ static class NatProbeChecks
             $"{kind}: recipient A/B probes {receivedA.Length}/{receivedB.Length}, expected {expectedA}/{expectedB}; decoded caller/recipient correct {valid}; request returned {dispatchReturned && error == 0}");
     }
 
-    static StationURL Url(QClient target, string? address = null) => new("prudp", address ?? target.Endpoint.Address.ToString(),
+    internal static StationURL Url(QClient target, string? address = null) => new("prudp", address ?? target.Endpoint.Address.ToString(),
         new Dictionary<string, int> { ["port"] = target.Endpoint.Port, ["RVCID"] = unchecked((int)target.PlayerInfo.RVCID), ["type"] = 3 });
-    sealed class ProbeRequest
+    internal sealed class ProbeRequest
     {
         public List<StationURL> urlTargetList { get; set; } = [];
     }
-    static QPacket Packet(uint signature, ushort sequence) => new()
+    internal static QPacket Packet(uint signature, ushort sequence) => new()
     {
         type = QPacket.PACKETTYPE.DATA,
         flags = [QPacket.PACKETFLAG.FLAG_RELIABLE],
@@ -231,7 +231,7 @@ static class NatProbeChecks
         payload = [],
         usesCompression = false
     };
-    static QPacket[] Drain(UdpClient receiver)
+    internal static QPacket[] Drain(UdpClient receiver)
     {
         var packets = new List<QPacket>();
         var from = new IPEndPoint(IPAddress.Any, 0);
@@ -239,7 +239,7 @@ static class NatProbeChecks
             packets.Add(new QPacket(receiver.Receive(ref from)));
         return packets.ToArray();
     }
-    static bool ValidProbe(QPacket packet, QClient recipient, QClient caller)
+    internal static bool ValidProbe(QPacket packet, QClient recipient, QClient caller)
     {
         var rmc = new RMCPacket(packet);
         using var body = new MemoryStream(packet.payload);
@@ -250,16 +250,18 @@ static class NatProbeChecks
             && rmc.methodID == 2 && station.Address == caller.Endpoint.Address.ToString()
             && station["port"] == caller.Endpoint.Port && station["RVCID"] == unchecked((int)caller.PlayerInfo.RVCID);
     }
-    sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         public readonly UdpClient Socket = new(new IPEndPoint(IPAddress.Loopback, 0));
         public readonly UdpClient CallerSocket = new(new IPEndPoint(IPAddress.Loopback, 0));
-        public readonly UdpClient ReceiverA = new(new IPEndPoint(IPAddress.Loopback, 0));
-        public readonly UdpClient ReceiverB = new(new IPEndPoint(IPAddress.Loopback, 0));
+        public readonly UdpClient ReceiverA;
+        public readonly UdpClient ReceiverB;
         public readonly QPacketHandlerPRUDP Handler;
         public readonly QClient Caller, A, B;
-        public Fixture()
+        public Fixture(IPAddress? targetAddress = null, IPAddress? extraAddress = null)
         {
+            ReceiverA = new(new IPEndPoint(targetAddress ?? IPAddress.Loopback, 0));
+            ReceiverB = new(new IPEndPoint(extraAddress ?? IPAddress.Loopback, 0));
             Handler = new(Socket, 2, 0, "nat-probe-check");
             Caller = Add(CallerSocket, 1);
             A = Add(ReceiverA, 2);

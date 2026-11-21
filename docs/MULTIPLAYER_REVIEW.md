@@ -32,6 +32,12 @@ Probe targets can advertise an alternate endpoint while still identifying a curr
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter nat-probe-`. All 36 selected scenarios pass; 18 diagnostics checks pass. Full snapshot: 73 scenarios, 65 passes, 8 invariant failures, 0 harness errors.
 
+### 05. Isolate pending fragment ownership and transport cleanup
+
+One handler previously mixed fragmented messages from different clients, acknowledged them to the current callback client and cleared unrelated pending data. Pending buffers are isolated by transport object, signature, session and both virtual ports. Dropping a transport discards only its buffers. Tests interleave 2/5/8 owners and verify serialized RMC replies and ACK recipients.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter fragment-,interleaved-fragment-,ordered-fragment-`. All 23 selected scenarios pass; 21 diagnostics checks pass. Full snapshot: 94 scenarios, 87 passes, 7 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

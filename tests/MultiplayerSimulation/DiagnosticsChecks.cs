@@ -65,6 +65,9 @@ static class DiagnosticsChecks
         Assert(natChecks.All(x => x.Item1), "NAT fallback, rejection and exact-route controls pass with diagnostics enabled");
         var malformedNat = new RDVServices.Services.NATTraversalService { Context = new(new RMCPacket(), h, client, packet) };
         malformedNat.RequestProbeInitiation([new StationURL("prudp", secret, new Dictionary<string, int> { ["port"] = 3074 })]);
+        var fragmentChecks = new[] { "session-isolation", "ack-recipient-isolation", "dropped-owner-cleanup", "inactive-owner-cleanup" }
+            .Select(kind => FragmentIsolationChecks.Run(kind, secret)).Append(FragmentIsolationChecks.Run("rmc-dispatch-2")).ToArray();
+        Assert(fragmentChecks.All(x => x.Item1), "fragment isolation, transport cleanup and wire dispatch pass with diagnostics enabled");
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -92,6 +95,16 @@ static class DiagnosticsChecks
         Assert(new[] { "endpoint_available", "duplicate_target" }.All(reason => lookups.Any(x => x.GetProperty("suppression").GetString() == reason && !x.GetProperty("probe_queued").GetBoolean()))
             && new[] { "invalid_endpoint", "caller_not_current" }.All(reason => lookups.Any(x => x.GetProperty("reason").GetString() == reason && !x.GetProperty("probe_queued").GetBoolean())),
             "NAT duplicate suppression, invalid target and stale caller reasons recorded");
+        var selections = records.Where(x => x.RootElement.GetProperty("event").GetString() == "fragment.selection")
+            .Select(x => x.RootElement.GetProperty("data")).ToArray();
+        Assert(selections.All(x => x.GetProperty("details").GetProperty("selected").EnumerateArray().All(fragment =>
+                new[] { "signature", "session", "source_vport", "destination_vport" }.All(key => fragment.GetProperty(key).GetRawText() == x.GetProperty("packet").GetProperty(key).GetRawText())))
+            && selections.Any(x => x.GetProperty("details").GetProperty("retained_streams").GetInt32() > 0),
+            "fragment selection stays within incoming stream and records unrelated retained buffers");
+        var fragmentDrops = records.Where(x => x.RootElement.GetProperty("event").GetString() == "fragment.drop")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(new[] { "disconnect", "inactivity" }.All(reason => fragmentDrops.Any(x => x.GetProperty("reason").GetString() == reason && x.GetProperty("pending").GetInt32() == 1)),
+            "fragment discard reasons and pending counts recorded for dropped transports");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");

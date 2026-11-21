@@ -28,7 +28,8 @@ namespace QNetZ
 		public string SourceName;
 		public readonly uint PID;
 		public readonly ushort Port;
-		private List<QPacket> AccumulatedPackets = new List<QPacket>();
+		private readonly Dictionary<(QClient Owner, uint Signature, byte Session, byte? Source, byte? Destination), List<QPacket>>
+			FragmentBuffers = new();
 		private List<QReliableResponse> CachedResponses = new List<QReliableResponse>();
 		private readonly List<ulong> NATPingTimeToIgnore = new List<ulong>();
 
@@ -418,6 +419,7 @@ namespace QNetZ
 						reason = client.State == QClient.StateType.Dropped ? "disconnect" : "inactivity",
 						idle_seconds = client.TimeSinceLastPacket
 					});
+					DropFragmentBuffers(client, client.State == QClient.StateType.Dropped ? "disconnect" : "inactivity");
 					QLog.WriteLine(2, $"[{SourceName}] dropping client: 0x{client.IDsend.ToString("X8")}");
 					client.State = QClient.StateType.Dropped;
 				}
