@@ -50,6 +50,10 @@ namespace QNetZ
 
 			if (!packet.flags.Contains(QPacket.PACKETFLAG.FLAG_RELIABLE))
 				return true;
+			Trace("fragment.receive", client, packet, details: () => new
+			{
+				buffer = AccumulatedPackets.Select(x => new { signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber }).ToArray()
+			});
 
 			if (!AccumulatedPackets.Any(x =>
 				 x.uiSeqId == packet.uiSeqId &&
@@ -65,6 +69,7 @@ namespace QNetZ
 
 			if (packet.m_byPartNumber != 0)
 			{
+				Trace("fragment.wait", client, packet);
 				// add and don't process
 				return false;
 			}
@@ -80,6 +85,11 @@ namespace QNetZ
 			}
 
 			var fragments = orderedFragments.Take(numPackets).ToArray();
+			Trace("fragment.selection", client, packet, details: () => new
+			{
+				selected = fragments.Select(x => new { signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber }).ToArray(),
+				cleared_count = AccumulatedPackets.Count
+			});
 
 			// remove fragments that we processed
 			AccumulatedPackets.Clear();//RemoveAll(x => fragments.Contains(x));
@@ -99,6 +109,7 @@ namespace QNetZ
 
 					if (fragments.Length == nfrag && fragPacket.m_byPartNumber != 0)
 					{
+						Trace("fragment.reject", client, packet, details: () => new { reason = "missing_final_part" });
 						QLog.WriteLine(1, "ERROR : packet sequence does not end with 0 - call a programmer!");
 						return false;
 					}
@@ -107,6 +118,7 @@ namespace QNetZ
 					{
 						if (fragPacket.m_byPartNumber != nfrag)
 						{
+							Trace("fragment.reject", client, packet, details: () => new { reason = "insufficient_parts", expected_part = nfrag });
 							QLog.WriteLine(1, "ERROR : insufficient packet fragments - call a programmer!");
 							return false;
 						}
@@ -134,6 +146,7 @@ namespace QNetZ
 				QLog.WriteLine(10, $"Defragmented sequence of {numPackets} packets !\n");
 			}
 
+			Trace("fragment.complete", client, packet, details: () => new { fragments = numPackets });
 			return true;
 		}
 
@@ -142,6 +155,12 @@ namespace QNetZ
 		{
 			lock (CachedResponses)
 			{
+				Trace("ack.matches", packet: ackPacket, details: () => new
+				{
+					matches = CachedResponses.SelectMany(cr => cr.ResponseList
+						.Where(x => x.Packet.m_bySessionID == ackPacket.m_bySessionID && x.Packet.uiSeqId == ackPacket.uiSeqId)
+						.Select(x => new { destination = cr.Endpoint.ToString(), response_signature = x.Packet.m_uiSignature, sequence = x.Packet.uiSeqId })).ToArray()
+				});
 				foreach (var cr in CachedResponses)
 				{
 					cr.ResponseList.RemoveAll(x =>
@@ -222,6 +241,12 @@ namespace QNetZ
 			lock (cache.ResponseList)
 			{
 				cache.ResponseList.Add(new QPacketState(responsePacket));
+				Trace("cache.enqueue", packet: responsePacket, endpoint: ep, details: () => new
+				{
+					cached_destination = cache.Endpoint.ToString(), destination_matches = cache.Endpoint.Equals(ep),
+					request_signature = requestPacket?.m_uiSignature, request_session = requestPacket?.m_bySessionID,
+					request_sequence = requestPacket?.uiSeqId, expires_utc = cache.DropTime, pending = cache.ResponseList.Count
+				});
 			}
 			return true;
 		}
@@ -235,7 +260,12 @@ namespace QNetZ
                 foreach (var crp in cache.ResponseList)
 				{
 					var data = crp.Packet.toBuffer();
-					UDP.Send(data, data.Length, cache.Endpoint);
+					Trace("cache.transmit", packet: crp.Packet, endpoint: cache.Endpoint, details: () => new
+					{
+						prior_send_count = crp.ReSendCount, expires_utc = cache.DropTime, due_utc = cache.ResendTime,
+						expired = DateTime.UtcNow >= cache.DropTime
+					});
+					SendDatagram(data, cache.Endpoint, crp.Packet, "reliable");
 
 					crp.ReSendCount++;
 					minResendTimes = Math.Min(minResendTimes, crp.ReSendCount);
@@ -250,6 +280,9 @@ namespace QNetZ
 			lock (CachedResponses)
 			{
 				reliableResend = CachedResponses.Where(x => x.SrcPacket != null && DateTime.UtcNow >= x.ResendTime).ToArray();
+				if (NetworkDiagnostics.Enabled)
+					foreach (var expiring in CachedResponses.Where(x => x.SrcPacket == null || DateTime.UtcNow >= x.DropTime))
+						Trace("cache.expire", endpoint: expiring.Endpoint, details: () => new { pending = expiring.ResponseList.Count, expires_utc = expiring.DropTime });
 				int droppedPackets = CachedResponses.RemoveAll(x => x.SrcPacket == null || DateTime.UtcNow >= x.DropTime);
 
 				if(droppedPackets > 0)

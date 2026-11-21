@@ -59,6 +59,11 @@ namespace DSFServices
 		}
 		public static void SendNotification(QPacketHandlerPRUDP handler, QClient client, NotificationEvent eventData)
 		{
+			handler.Trace("notification.queued", client, details: () => new
+			{
+				source_pid = eventData.m_pidSource, type = eventData.m_uiType,
+				param1 = eventData.m_uiParam1, param2 = eventData.m_uiParam2, param3 = eventData.m_uiParam3
+			});
 			RMC.SendRMCCall(handler, client, RMCProtocolId.NotificationEventManager, 1, new RMCPRequestDDL<NotificationEvent>(eventData));
 		}
 	}

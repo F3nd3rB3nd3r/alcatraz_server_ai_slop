@@ -314,6 +314,7 @@ namespace DSFServices.Services
 		[RMCMethod(11)]
 		public RMCResult Participate(uint idGathering, string strMessage)
 		{
+			Context.Handler.Trace("gathering.join.request", Context.Client, details: () => new { gathering = idGathering });
 			var plInfo = Context.Client.PlayerInfo;
 			bool result = false;
 			var gathering = PartySessions.GatheringList.FirstOrDefault(x => x.Session.m_idMyself == idGathering);
@@ -334,6 +335,7 @@ namespace DSFServices.Services
 		[RMCMethod(12)]
 		public RMCResult CancelParticipation(uint idGathering, string strMessage)
 		{
+			Context.Handler.Trace("gathering.leave.request", Context.Client, details: () => new { gathering = idGathering });
 			var plInfo = Context.Client.PlayerInfo;
 			bool result = false;
 			var gathering = PartySessions.GatheringList.FirstOrDefault(x => x.Session.m_idMyself == idGathering);
@@ -546,6 +548,7 @@ namespace DSFServices.Services
 		[RMCMethod(39)]
 		public RMCResult RegisterLocalURLs(uint gid, IEnumerable<StationURL> lstUrls)
 		{
+			Context.Handler.Trace("gathering.urls.request", Context.Client, details: () => new { gathering = gid });
 			var gathering = PartySessions.GatheringList.FirstOrDefault(x => x.Session.m_idMyself == gid);
 
 			if (gathering != null)
@@ -566,6 +569,7 @@ namespace DSFServices.Services
 		[RMCMethod(40)]
 		public RMCResult UpdateSessionHost(uint gid)
 		{
+			Context.Handler.Trace("gathering.host.request", Context.Client, details: () => new { gathering = gid });
 			var plInfo = Context.Client.PlayerInfo;
 			var gathering = PartySessions.GatheringList.FirstOrDefault(x => x.Session.m_idMyself == gid);
 
@@ -585,6 +589,11 @@ namespace DSFServices.Services
 		public RMCResult GetSessionURLs(uint gid)
 		{
 			var gathering = PartySessions.GatheringList.FirstOrDefault(x => x.Session.m_idMyself == gid);
+			Context.Handler.Trace("gathering.urls.returned", Context.Client, details: () => new
+			{
+				gathering = gid, found = gathering != null,
+				urls = gathering?.Urls.Select(NetworkDiagnostics.Station).ToArray()
+			});
 
 			if (gathering != null)
 			{

@@ -221,6 +221,7 @@ namespace DSFServices.Services
 		[RMCMethod(6)]
 		public RMCResult GetSession(GameSessionKey gameSessionKey)
 		{
+			Context.Handler.Trace("session.get.request", Context.Client, details: () => new { session = gameSessionKey.m_sessionID, type = gameSessionKey.m_typeID });
 			var searchResult = new GameSessionSearchResult();
 
 			var session = GameSessions.SessionList.FirstOrDefault(x => x.Id == gameSessionKey.m_sessionID && x.TypeID == gameSessionKey.m_typeID);
@@ -293,6 +294,7 @@ namespace DSFServices.Services
 		[RMCMethod(8)]
 		public RMCResult AddParticipants(GameSessionKey gameSessionKey, IEnumerable<uint> publicParticipantIDs, IEnumerable<uint> privateParticipantIDs)
 		{
+			Context.Handler.Trace("session.add_participants.request", Context.Client, details: () => new { session = gameSessionKey.m_sessionID, type = gameSessionKey.m_typeID });
 			var session = GameSessions.SessionList.FirstOrDefault(x => x.IsMatchingKey(gameSessionKey));
 
 			if(session != null)
@@ -334,6 +336,7 @@ namespace DSFServices.Services
 		[RMCMethod(9)]
 		public RMCResult RemoveParticipants(GameSessionKey gameSessionKey, IEnumerable<uint> participantIDs)
 		{
+			Context.Handler.Trace("session.remove_participants.request", Context.Client, details: () => new { session = gameSessionKey.m_sessionID, type = gameSessionKey.m_typeID });
 			var session = GameSessions.SessionList.FirstOrDefault(x => x.IsMatchingKey(gameSessionKey));
 
 			if (session != null)
@@ -471,6 +474,7 @@ namespace DSFServices.Services
 		[RMCMethod(21)]
 		public RMCResult RegisterURLs(IEnumerable<StationURL> stationURLs)
 		{
+			Context.Handler.Trace("session.urls.request", Context.Client);
 			var plInfo = Context.Client.PlayerInfo;
 			var myPlayerId = plInfo.PID;
 			var session = GameSessions.SessionList.FirstOrDefault(x => x.HostPID == myPlayerId);

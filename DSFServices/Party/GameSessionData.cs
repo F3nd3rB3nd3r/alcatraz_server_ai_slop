@@ -25,6 +25,7 @@ namespace DSFServices
 
 		public static void UpdateSessionParticipation(PlayerInfo playerInfo, GameSessionKey newSessionKey, bool privateSlot)
 		{
+			MultiplayerDiagnostics.Participation("session.participation.begin", playerInfo, null, newSessionKey?.m_sessionID, newSessionKey?.m_typeID);
 			// delete player from old sessions
 			var participatingSessions = SessionList.Where(x =>
 				x.Participants.Contains(playerInfo.PID) &&
@@ -63,6 +64,7 @@ namespace DSFServices
 			});
 
 			playerInfo.GameData().CurrentSession = newSessionKey;
+			MultiplayerDiagnostics.Participation("session.participation.complete", playerInfo, null, newSessionKey?.m_sessionID, newSessionKey?.m_typeID);
 		}
 	}
 

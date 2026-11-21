@@ -15,11 +15,20 @@ namespace QNetZ
 
 		public void OnDropped()
 		{
+			NetworkDiagnostics.Record("player.cleanup.begin", () => new { pid = PID, rvcid = RVCID, connection = Client?.IDrecv });
 			if (Client != null)
 				Client.PlayerInfo = null;
 
 			foreach (var ds in DataStore.Values)
-				ds.OnDropped();
+			{
+				try { ds.OnDropped(); }
+				catch (Exception ex)
+				{
+					NetworkDiagnostics.Record("player.cleanup.error", () => new { pid = PID, store = ds.GetType().Name, error_type = ex.GetType().Name });
+					throw;
+				}
+			}
+			NetworkDiagnostics.Record("player.cleanup.complete", () => new { pid = PID, rvcid = RVCID });
 		}
 
 		public QClient Client;	// connection info

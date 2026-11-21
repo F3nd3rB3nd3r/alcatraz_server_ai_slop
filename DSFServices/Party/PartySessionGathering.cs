@@ -17,6 +17,7 @@ namespace DSFServices
 		/// <param name="newGatheringId"></param>
 		public static void UpdateGatheringParticipation(PlayerInfo playerInfo, uint newGatheringId)
 		{
+			MultiplayerDiagnostics.Participation("gathering.participation.begin", playerInfo, newGatheringId, null, null);
 			// remove this participant from all gatherings
 			// except new one and remove station urls associated
 			var oldGatherings = GatheringList.Where(x => x.Participants.Contains(playerInfo.PID) && x.Session.m_idMyself != newGatheringId).ToArray();			
@@ -41,6 +42,7 @@ namespace DSFServices
 			});
 
 			playerInfo.GameData().CurrentGatheringId = newGatheringId;
+			MultiplayerDiagnostics.Participation("gathering.participation.complete", playerInfo, newGatheringId, null, null);
 		}
 	}
 

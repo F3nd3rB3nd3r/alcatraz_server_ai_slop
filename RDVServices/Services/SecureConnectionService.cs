@@ -20,8 +20,10 @@ namespace RDVServices.Services
 		{
 			// change address
 			var rdvConnectionUrl = new StationURL(vecMyURLs.Last().ToString());
+			Context.Handler.Trace("endpoint.secure.submitted", Context.Client, details: () => new { selected = NetworkDiagnostics.Station(rdvConnectionUrl) });
 			rdvConnectionUrl.Address = Context.Client.Endpoint.Address.ToString();
 			rdvConnectionUrl["type"] = 3;
+			Context.Handler.Trace("endpoint.secure.returned", Context.Client, details: () => new { returned = NetworkDiagnostics.Station(rdvConnectionUrl) });
 
 			var result = new RegisterResult()
 			{
@@ -52,8 +54,10 @@ namespace RDVServices.Services
 			{
 				// change address
 				var rdvConnectionUrl = new StationURL(vecMyURLs.Last().ToString());
+				Context.Handler.Trace("endpoint.secure.submitted", Context.Client, details: () => new { selected = NetworkDiagnostics.Station(rdvConnectionUrl) });
 				rdvConnectionUrl.Address = Context.Client.Endpoint.Address.ToString();
 				rdvConnectionUrl["type"] = 3;
+				Context.Handler.Trace("endpoint.secure.returned", Context.Client, details: () => new { returned = NetworkDiagnostics.Station(rdvConnectionUrl) });
 
 				var result = new RegisterResult()
 				{

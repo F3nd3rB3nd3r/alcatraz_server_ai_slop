@@ -357,6 +357,7 @@ namespace DSFServices.Services
 		[RMCMethod(15)]
 		public RMCResult JoinMatchmakingStatus(uint gid, uint pid, bool joinSuccess)
 		{
+			Context.Handler.Trace("gathering.join.result", Context.Client, details: () => new { gathering = gid, pid, success = joinSuccess });
 			var gathering = PartySessions.GatheringList.FirstOrDefault(x => x.Session.m_idMyself == gid);
 
 			if (gathering != null)

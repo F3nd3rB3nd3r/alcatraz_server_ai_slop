@@ -21,6 +21,11 @@ namespace RDVServices.Services
 			{
 				var endp = new IPEndPoint(IPAddress.Parse(urlTarget.Address), urlTarget.Parameters["port"]);
 				var qclient = Context.Handler.GetQClientByEndPoint(endp);
+				Context.Handler.Trace("nat.probe.lookup", Context.Client, endpoint: endp, details: () => new
+				{
+					target = NetworkDiagnostics.Station(urlTarget), found = qclient != null,
+					target_connection = qclient?.IDrecv, target_pid = qclient?.PlayerInfo?.PID
+				});
 
 				if(qclient != null)
 				{
@@ -57,6 +62,7 @@ namespace RDVServices.Services
 		[RMCMethod(4)] 
 		public RMCResult ReportNATTraversalResult(uint cid, bool result)
 		{
+			Context.Handler.Trace("nat.result", Context.Client, details: () => new { cid, result });
 			UNIMPLEMENTED();
 			return Error(0);
 		}
@@ -78,6 +84,7 @@ namespace RDVServices.Services
 		[RMCMethod(7)] 
 		public RMCResult ReportNATTraversalResultDetail(uint cid, bool result, int detail, uint rtt)
 		{
+			Context.Handler.Trace("nat.result.detail", Context.Client, details: () => new { cid, result, detail, rtt });
 			UNIMPLEMENTED();
 			return Error(0);
 		}

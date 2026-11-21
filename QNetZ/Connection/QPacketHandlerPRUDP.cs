@@ -15,6 +15,8 @@ namespace QNetZ
 			SourceName = sourceName;
 			PID = pid;
 			Port = port;
+			NetworkDiagnostics.StartFromEnvironment();
+			Trace("handler.created");
 
 			if (QConfiguration.Instance == null)
 			{
@@ -46,6 +48,7 @@ namespace QNetZ
 
 			QLog.WriteLine(2, $"[{SourceName}] Got SYN packet");
 			qclient.SeqCounterOut = 0;
+			Trace("connection.syn", qclient, p, from);
 
 			p.m_uiConnectionSignature = qclient.IDrecv;
 
@@ -56,6 +59,7 @@ namespace QNetZ
 		{
 			client.IDsend = p.m_uiConnectionSignature;
 			client.State = QClient.StateType.Active;
+			Trace("connection.connect", client, p);
 
 			QLog.WriteLine(2, $"[{SourceName}] Got CONNECT packet");
 
@@ -97,10 +101,17 @@ namespace QNetZ
 
 			if (playerInfo == null)
 			{
+				Trace("connection.association.missing_player", client, p, details: () => new { requested_pid = userPrincipalID, connection_id = connectionId });
 				QLog.WriteLine(1, $"User pid={userPrincipalID} seem to be dropped but connect was received");
 				return [];
 			}
 
+			Trace("connection.association.begin", client, p, details: () => new
+			{
+				requested_pid = userPrincipalID, connection_id = connectionId,
+				previous_connection = playerInfo.Client?.IDrecv,
+				repeated_association = ReferenceEquals(client.PlayerInfo, playerInfo)
+			});
 			// drop player in case when of new account but same address
 			if (client.PlayerInfo != null)
 			{
@@ -109,6 +120,7 @@ namespace QNetZ
 
 			playerInfo.Client = client;
 			client.PlayerInfo = playerInfo;
+			Trace("connection.association.complete", client, p);
 
 			uint responseCode = Helper.ReadU32(m);
 
@@ -123,6 +135,7 @@ namespace QNetZ
 		private QPacket ProcessDISCONNECT(QClient client, QPacket p)
 		{
 			client.State = QClient.StateType.Dropped;
+			Trace("connection.disconnect", client, p);
 
 			QPacket reply = MakeACK(p, client);
 			reply.m_uiSignature = client.IDsend;
@@ -151,7 +164,7 @@ namespace QNetZ
 
 			// bufferize in queue then send, that's how Quazal does it
 			if (!CacheResponse(reqPacket, sendPacket, ep))
-				UDP.Send(data, data.Length, ep);
+				SendDatagram(data, ep, sendPacket, "immediate");
 
 			QLog.LogPacket(true, data);
 		}
@@ -174,7 +187,7 @@ namespace QNetZ
 			var np = MakeACK(p, client);
 			var data = np.toBuffer();
 
-			UDP.Send(data, data.Length, client.Endpoint);
+			SendDatagram(data, client.Endpoint, np, "ack");
 		}
 
 		public void MakeAndSend(QClient client, QPacket reqPacket, QPacket newPacket, byte[] data)
@@ -230,9 +243,16 @@ namespace QNetZ
 
 		public void ProcessPacket(byte[] data, IPEndPoint from)
 		{
+			Trace("udp.receive", endpoint: from, details: () => new { bytes = data.Length });
 			while (true)
 			{
-				var packetIn = new QPacket(data);
+				QPacket packetIn;
+				try { packetIn = new QPacket(data); }
+				catch (Exception ex)
+				{
+					Trace("packet.parse.error", endpoint: from, details: () => new { error_type = ex.GetType().Name, remaining_bytes = data.Length });
+					throw;
+				}
 
 				{
 					var m = new MemoryStream(data);
@@ -256,6 +276,11 @@ namespace QNetZ
 
 				if (packetIn.type != QPacket.PACKETTYPE.SYN && packetIn.type != QPacket.PACKETTYPE.NATPING)
 					client = GetQClientByIDrecv(packetIn.m_uiSignature);
+				Trace("packet.receive", client, packetIn, from, () => new
+				{
+					endpoint_matches = client == null ? (bool?)null : client.Endpoint.Equals(from),
+					client_found = client != null
+				});
 
 				// update client to not time out him
 				if (client != null)
@@ -297,6 +322,7 @@ namespace QNetZ
 							var cache = GetCachedResponseByRequestPacket(packetIn);
 							if (cache != null)
 							{
+								Trace("cache.replay", client, packetIn, details: () => new { destination = cache.Endpoint.ToString() });
 								SendACK(packetIn, client);
 								RetrySend(cache);
 								break;
@@ -318,6 +344,7 @@ namespace QNetZ
 							reply = ProcessPING(client, packetIn);
 						break;
 					case QPacket.PACKETTYPE.NATPING:
+						Trace("nat.ping", packet: packetIn, endpoint: from);
 
 						ulong time = BitConverter.ToUInt64(packetIn.payload, 5);
 
@@ -386,6 +413,11 @@ namespace QNetZ
 				if (client.State == QClient.StateType.Dropped ||
 					client.TimeSinceLastPacket > Constants.ClientTimeoutSeconds)
 				{
+					Trace("connection.drop", client, details: () => new
+					{
+						reason = client.State == QClient.StateType.Dropped ? "disconnect" : "inactivity",
+						idle_seconds = client.TimeSinceLastPacket
+					});
 					QLog.WriteLine(2, $"[{SourceName}] dropping client: 0x{client.IDsend.ToString("X8")}");
 					client.State = QClient.StateType.Dropped;
 				}
@@ -412,6 +444,7 @@ namespace QNetZ
 			var qclient = new QClient(++ClientIdCounter, from);
 
 			Clients.Add(qclient);
+			Trace("connection.created", qclient, endpoint: from);
 			return qclient;
 		}
 
