@@ -167,12 +167,15 @@ static class FragmentIsolationChecks
         }
         var otherComplete = Feed(h, otherOwner, other);
         var otherAcks = NatProbeChecks.Drain(f.Receivers[1]);
-        var last = Fragment(a, 12, 0, "end", ack: wantsAck);
+        // Keep the tested message contiguous in its own buffer. The other
+        // owner/session/stream deliberately reuses sequence 11; this still
+        // exposes cross-buffer mixing without assuming gaps within A's body.
+        var last = Fragment(a, 11, 0, "end", ack: wantsAck);
         var firstComplete = Feed(h, a, last);
         var firstAcks = NatProbeChecks.Drain(f.Receivers[0]);
         var passed = waitFirst && otherComplete && Body(other) == "single" && firstComplete && Body(last) == prefix + "end" && Pending(h) == 0;
         if (wantsAck)
-            passed &= otherAcks.Length == 0 && ValidAcks(firstAcks, a, [10, 12]);
+            passed &= otherAcks.Length == 0 && ValidAcks(firstAcks, a, [10, 11]);
         return (passed, $"{kind}: other body isolated {otherComplete && Body(other) == "single"}; first body preserved {firstComplete && Body(last) == prefix + "end"}; ACK A/B {firstAcks.Length}/{otherAcks.Length}");
     }
 

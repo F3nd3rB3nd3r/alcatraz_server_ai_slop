@@ -24,6 +24,14 @@ namespace QNetZ
 		}
 		public static void HandlePacket(QPacketHandlerPRUDP handler, QPacket p, QClient client)
 		{
+			var rejection = GetFrameRejectionReason(p.payload);
+			if (rejection != null)
+			{
+				// A final-first fragment tail can look like a reply to the lenient
+				// reader. Do not ACK it or advance session state before it is whole.
+				handler.Trace("rmc.frame.reject", client, p, details: () => new { reason = rejection });
+				return;
+			}
 			client.SessionID = p.m_bySessionID;
 
 			if (p.uiSeqId > client.SeqCounter)
@@ -34,6 +42,18 @@ namespace QNetZ
 				HandleRequest(handler, client, p, rmc);
 			else
 				HandleResponse(handler, client, p, rmc);
+		}
+
+		private static string GetFrameRejectionReason(byte[] payload)
+		{
+			if (payload == null || payload.Length < 5)
+				return "short_header";
+			if (BitConverter.ToUInt32(payload, 0) != (uint)(payload.Length - 4))
+				return "length_mismatch";
+			int minimumHeader = (payload[4] & 0x80) != 0 ? 13 : 14;
+			if ((payload[4] & 0x7f) == 0x7f)
+				minimumHeader += 2;
+			return payload.Length < minimumHeader ? "short_header" : null;
 		}
 
 		public static void HandleResponse(QPacketHandlerPRUDP handler, QClient client, QPacket p, RMCPacket rmc)

@@ -56,6 +56,12 @@ A response selected before expiry could be sent after its deadline; the send pat
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter expiry-,first-send-,expired-cache-late-send`. All 18 selected scenarios pass; 29 diagnostics checks pass. Full snapshot: 182 scenarios, 179 passes, 3 invariant failures, 0 harness errors.
 
+### 09. Reassemble one complete fragment group across wrap and reject incomplete RMC frames
+
+Numeric sequence sorting failed across 65535-to-0 and completing one message could consume another buffered prefix in the same stream. Selection now uses a preceding part-one anchor and bounded modular distances, retaining other messages. Known missing-middle groups are rejected before fragment ACKs. Incomplete standalone RMC tails are rejected before RMC ACK/state changes, allowing existing selective retries. All 24 permutations of two two-fragment RPCs and all six permutations of a three-fragment RPC are tested. This adds no global receive-order window; fragment-layer ACKs still precede RMC validation of an assembled group.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter fragment-,interleaved-fragment-,ordered-fragment-,contract-,edge-`. All 94 selected scenarios pass; 35 diagnostics checks pass. Full snapshot: 253 scenarios, 250 passes, 3 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

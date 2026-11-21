@@ -44,6 +44,19 @@ static class DiagnosticsChecks
             usesCompression = false
         };
         h.Trace("privacy.probe", client, packet);
+        var malformedFrame = new QPacket
+        {
+            type = QPacket.PACKETTYPE.DATA,
+            flags = [QPacket.PACKETFLAG.FLAG_RELIABLE, QPacket.PACKETFLAG.FLAG_NEED_ACK],
+            m_oSourceVPort = new(0x3f),
+            m_oDestinationVPort = new(0x31),
+            m_uiSignature = client.IDrecv,
+            m_bySessionID = 1,
+            uiSeqId = 99,
+            payload = Encoding.UTF8.GetBytes(secret),
+            usesCompression = false
+        };
+        h.ProcessPacket(malformedFrame.toBuffer(), client.Endpoint);
         NetworkDiagnostics.Record("snapshot.error", () => throw new InvalidOperationException(secret));
         NetworkDiagnostics.Record("after.snapshot.error", () => new { ok = true });
         var rmc = new RMCPacket
@@ -86,8 +99,17 @@ static class DiagnosticsChecks
         Assert(cleanupChecks.All(x => x.Item1), "lobby/event/endpoint cleanup and owner disconnect pass with diagnostics enabled");
         Assert(RetryExpiryChecks.Cases.Select(item => RetryExpiryChecks.Run(item.Kind)).All(x => x.Item1),
             "retry expiry, live deadline boundary and valid-send controls pass with diagnostics enabled");
+        Assert(ProtocolContractChecks.Cases.Select(item =>
+        {
+            NetworkPlayers.Players.Clear();
+            GameSessions.SessionList.Clear();
+            PartySessions.GatheringList.Clear();
+            return ProtocolContractChecks.Run(item.Kind);
+        }).All(x => x.Item1), "host URL, late cancellation and multipart-integrity controls pass with diagnostics enabled");
         Assert(NotificationFirstSendChecks.Cases.Select(item => NotificationFirstSendChecks.Run(item.Kind)).All(x => x.Item1),
-            "independent first sends preserve older retry schedules with diagnostics enabled");
+            "independent first sends, fragmentation and unchanged old retry schedules pass with diagnostics enabled");
+        Assert(TransportEdgeChecks.Cases.Select(item => TransportEdgeChecks.Run(item.Kind)).All(x => x.Item1),
+            "wrap, overlapping messages, all arrival permutations and selective retry pass with diagnostics enabled");
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -147,6 +169,24 @@ static class DiagnosticsChecks
             .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
         Assert(retrySkips.Length >= 2 && retrySkips.All(x => x.GetProperty("reason").GetString() == "expired")
             && Has("cache.expire"), "expired retry skips and scheduled cache retirement are explicit");
+        Assert(records.Any(x => x.RootElement.GetProperty("event").GetString() == "fragment.reject"
+            && x.RootElement.GetProperty("data").GetProperty("details").GetProperty("reason").GetString() == "sequence_gap"
+            && x.RootElement.GetProperty("data").GetProperty("details").GetProperty("expected_sequence").GetInt32() == 2
+            && x.RootElement.GetProperty("data").GetProperty("details").GetProperty("received_sequence").GetInt32() == 3),
+            "known multipart sequence gap identifies expected and received sequence without payload");
+        var cacheOrigins = records.Where(x => x.RootElement.GetProperty("event").GetString() == "cache.enqueue")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details").GetProperty("cache_origin").GetString()).ToArray();
+        Assert(new[] { "server_call", "client_request" }.All(cacheOrigins.Contains)
+            && lines.All(x => !x.Contains("ResponseCacheIdentity", StringComparison.Ordinal)),
+            "cache origin classification is recorded without internal identity objects");
+        var frameRejections = records.Where(x => x.RootElement.GetProperty("event").GetString() == "rmc.frame.reject")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(new[] { "short_header", "length_mismatch" }.All(reason => frameRejections.Any(x => x.GetProperty("reason").GetString() == reason))
+            && frameRejections.All(x => x.EnumerateObject().Select(p => p.Name).SequenceEqual(new[] { "reason" })),
+            "invalid RMC frames log classification only, without untrusted header words or payload");
+        Assert(records.Any(x => x.RootElement.GetProperty("event").GetString() == "fragment.selection"
+            && x.RootElement.GetProperty("data").GetProperty("details").GetProperty("retained_packets").GetInt32() > 0),
+            "fragment completion records retained messages in the same stream");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");

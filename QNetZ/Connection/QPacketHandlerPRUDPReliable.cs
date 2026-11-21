@@ -88,29 +88,25 @@ namespace QNetZ
 				return false;
 			}
 
-			// got last fragment, assemble
-			var orderedFragments = accumulated.OrderBy(x => x.uiSeqId);
-			int numPackets = 0;
-			foreach (var fragPacket in orderedFragments)
-			{
-				numPackets++;
-				if (fragPacket.m_byPartNumber == 0)
-					break;
-			}
-
-			var fragments = orderedFragments.Take(numPackets).ToArray();
+			// Select one message relative to its prefix, including 65535 -> 0.
+			// Reordered prefixes of other messages must survive this completion.
+			var fragments = SelectFragmentGroup(accumulated, packet);
+			int numPackets = fragments.Length;
 			Trace("fragment.selection", client, packet, details: () => new
 			{
 				selected = fragments.Select(x => new {
 					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
 					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
 				}).ToArray(),
-				cleared_count = accumulated.Count, retained_streams = FragmentBuffers.Count - 1
+				cleared_count = fragments.Length, retained_packets = accumulated.Count - fragments.Length,
+				retained_streams = FragmentBuffers.Count - (accumulated.Count == fragments.Length ? 1 : 0)
 			});
 
-			// Preserve the existing within-stream clearing/validation behavior,
-			// including rejection, without discarding another peer or stream.
-			FragmentBuffers.Remove(key);
+			// Discard this selection even on rejection, preserving other messages.
+			var selected = new HashSet<QPacket>(fragments);
+			accumulated.RemoveAll(selected.Contains);
+			if (accumulated.Count == 0)
+				FragmentBuffers.Remove(key);
 
 			if (numPackets > 1)
 			{
@@ -119,11 +115,16 @@ namespace QNetZ
 				int nfrag = 1;
 				foreach (var fragPacket in fragments)
 				{
-					//if(fragPacket.uiSeqId != seqId)
-					//{
-					//	QLog.WriteLine(1, "ERROR : packet sequence mismatch!");
-					//	//return false;
-					//}
+					// A known multipart group must not acknowledge or concatenate
+					// surviving fragments across a missing sequence.
+					if (fragPacket.uiSeqId != seqId)
+					{
+						Trace("fragment.reject", client, packet, details: () => new
+						{
+							reason = "sequence_gap", expected_sequence = seqId, received_sequence = fragPacket.uiSeqId
+						});
+						return false;
+					}
 
 					if (fragments.Length == nfrag && fragPacket.m_byPartNumber != 0)
 					{
@@ -166,6 +167,29 @@ namespace QNetZ
 
 			Trace("fragment.complete", client, packet, details: () => new { fragments = numPackets });
 			return true;
+		}
+
+		private static QPacket[] SelectFragmentGroup(List<QPacket> buffered, QPacket final)
+		{
+			// Part IDs 1..255 precede part 0. The closest preceding part-one
+			// anchor identifies the current message without a global order gate.
+			var prefix = buffered.Where(x => x.m_byPartNumber == 1)
+				.Select(x => new { Packet = x, Distance = unchecked((ushort)(final.uiSeqId - x.uiSeqId)) })
+				.Where(x => x.Distance > 0 && x.Distance <= byte.MaxValue)
+				.OrderBy(x => x.Distance).Select(x => x.Packet).FirstOrDefault();
+			if (prefix != null)
+			{
+				var distance = unchecked((ushort)(final.uiSeqId - prefix.uiSeqId));
+				return buffered.Where(x => unchecked((ushort)(x.uiSeqId - prefix.uiSeqId)) <= distance)
+					.OrderBy(x => unchecked((ushort)(x.uiSeqId - prefix.uiSeqId))).ToArray();
+			}
+
+			// Preserve validation of orphan non-final parts, without consuming
+			// future prefixes. With no preceding parts this is a standalone packet.
+			var orphans = buffered.Where(x => x.m_byPartNumber != 0
+				&& unchecked((ushort)(final.uiSeqId - x.uiSeqId)) <= byte.MaxValue).ToArray();
+			return orphans.Append(final)
+				.OrderByDescending(x => unchecked((ushort)(final.uiSeqId - x.uiSeqId))).ToArray();
 		}
 
 		private void DropFragmentBuffers(QClient client, string reason)

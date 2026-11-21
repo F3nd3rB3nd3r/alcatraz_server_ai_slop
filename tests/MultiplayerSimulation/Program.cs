@@ -74,8 +74,12 @@ foreach (var (kind, originalViolation) in CleanupIsolationChecks.Cases)
     Check("cleanup-" + kind, originalViolation, () => CleanupIsolationChecks.Run(kind));
 foreach (var (kind, originalViolation) in RetryExpiryChecks.Cases)
     Check("expiry-" + kind, originalViolation, () => RetryExpiryChecks.Run(kind));
+foreach (var (kind, originalViolation) in ProtocolContractChecks.Cases)
+    Check("contract-" + kind, originalViolation, () => ProtocolContractChecks.Run(kind));
 foreach (var (kind, originalViolation) in NotificationFirstSendChecks.Cases)
     Check("first-send-" + kind, originalViolation, () => NotificationFirstSendChecks.Run(kind));
+foreach (var (kind, originalViolation) in TransportEdgeChecks.Cases)
+    Check("edge-" + kind, originalViolation, () => TransportEdgeChecks.Run(kind));
 if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");
