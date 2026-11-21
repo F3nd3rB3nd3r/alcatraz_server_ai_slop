@@ -15,17 +15,35 @@ using QNetZ.Interfaces;
 QConfiguration.Instance = QConfiguration.MakeDevelopmentConfiguration("127.0.0.1");
 QLog.LogFunction = null;
 if (args.Contains("--verify-diagnostics")) return await DiagnosticsChecks.Run();
+var filterIndex = Array.IndexOf(args, "--filter");
+if (filterIndex >= 0 && (filterIndex + 1 >= args.Length || args[filterIndex + 1].StartsWith("--")))
+    throw new ArgumentException("--filter requires comma-separated scenario name prefixes");
+var filters = filterIndex < 0 ? Array.Empty<string>() : args[filterIndex + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+if (filterIndex >= 0 && filters.Length == 0) throw new ArgumentException("Empty scenario filter");
 var results = new List<Observation>();
 foreach (var count in new[] { 2, 5, 8 })
 {
     Check($"ack-isolation-{count}", true, () => AckIsolation(count, false));
     Check($"ack-distinct-sequence-control-{count}", false, () => AckIsolation(count, true));
 }
+Check("ack-wrong-session-control", false, () => AckGuard("session"));
+Check("ack-wrong-sequence-control", false, () => AckGuard("sequence"));
+Check("ack-wrong-stream", true, () => AckGuard("stream"));
+Check("ack-unknown-connection-control", false, () => AckGuard("unknown"));
+Check("ack-stale-response-signature", true, () => AckGuard("signature"));
+Check("ack-other-recipient", true, () => AckGuard("recipient"));
+Check("ack-duplicate-control", false, DuplicateAcks);
+Check("ack-stream-isolation", true, StreamAcks);
 Check("interleaved-fragment-ownership", true, InterleavedFragments);
 Check("ordered-fragment-control", false, OrderedFragments);
 Check("final-fragment-arrives-first", true, FinalFragmentFirst);
 Check("notification-cache-recipient-isolation", true, NotificationOwners);
-Check("notification-wire-recipient-isolation", true, NotificationWire);
+Check("notification-wire-recipient-isolation", true, () => NotificationWire(2));
+Check("notification-wire-recipient-isolation-5", true, () => NotificationWire(5));
+Check("notification-wire-recipient-isolation-8", true, () => NotificationWire(8));
+Check("notification-same-recipient-control", false, SameRecipientNotifications);
+Check("notification-same-port-different-address", true, SamePortRecipients);
+Check("cache-replay-recipient-control", false, ReplayRecipient);
 Check("lost-ack-retry-control", false, RetryControl);
 Check("expired-cache-late-send", true, ExpiredCache);
 Check("duplicate-connect-registry", true, DuplicateConnect);
@@ -35,6 +53,7 @@ Check("same-ip-different-port-cleanup", true, () => EndpointCleanup(true));
 Check("different-ip-cleanup-control", false, () => EndpointCleanup(false));
 Check("unrelated-empty-session", true, EmptySession);
 Check("disconnect-cleanup-grace-control", false, CleanupGrace);
+if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");
 var outputIndex = Array.IndexOf(args, "--output");
@@ -56,6 +75,9 @@ if (outputIndex >= 0)
 foreach (var r in results)
     Console.WriteLine($"{(r.Error != null ? "ERROR" : r.InvariantPassed ? "PASS" : "VIOLATION"),-10} {r.Name}: {r.Detail}");
 Console.WriteLine($"{results.Count} scenarios; {results.Count(x => !x.InvariantPassed && x.Error == null)} invariant violations; {results.Count(x => x.Error != null)} harness errors.");
+if (baseline)
+    foreach (var changed in results.Where(x => x.Error == null && x.InvariantPassed == x.ExpectedBaselineViolation))
+        Console.WriteLine($"BASELINE CHANGED: {changed.Name} no longer matches the original source behavior.");
 await NetworkDiagnostics.StopAsync();
 // Baseline mode checks the documented broken behavior and controls. Default mode
 // is the future regression gate: every invariant must pass, regardless of baseline.
@@ -63,6 +85,8 @@ return results.Any(x => x.Error != null || (baseline ? x.InvariantPassed == x.Ex
 
 void Check(string name, bool expectedViolation, Func<(bool Passed, string Detail)> test)
 {
+    if (filters.Length > 0 && !filters.Any(prefix => name.StartsWith(prefix, StringComparison.Ordinal)))
+        return;
     NetworkPlayers.Players.Clear();
     GameSessions.SessionList.Clear();
     PartySessions.GatheringList.Clear();
@@ -98,6 +122,15 @@ static QPacket Packet(uint signature, ushort seq, byte part = 0, string text = "
     usesCompression = false
 };
 static QPacketHandlerPRUDP Handler(UdpClient socket) => new(socket, 2, 0, "simulation");
+static QPacket ClientAck(QClient client, QPacket response)
+{
+    var ack = Packet(client.IDrecv, response.uiSeqId);
+    ack.flags = [QPacket.PACKETFLAG.FLAG_ACK];
+    ack.m_bySessionID = response.m_bySessionID;
+    ack.m_oSourceVPort = response.m_oDestinationVPort;
+    ack.m_oDestinationVPort = response.m_oSourceVPort;
+    return ack;
+}
 static QClient Client(QPacketHandlerPRUDP h, int port) => h.NewQClient(new(IPAddress.Loopback, port));
 static PlayerInfo Player(uint pid, int port, string ip = "127.0.0.1")
 {
@@ -122,13 +155,82 @@ static (bool, string) AckIsolation(int count, bool distinct)
     var h = Handler(socket);
     var clients = Enumerable.Range(0, count).Select(i => Client(h, 31000 + i)).ToArray();
     for (var i = 0; i < count; i++)
-        Invoke(h, "CacheResponse", Packet(clients[i].IDrecv, 1), Packet((uint)(1000 + i), (ushort)(distinct ? i + 1 : 1)), clients[i].Endpoint);
-    var ack = Packet(clients[0].IDrecv, 1);
-    ack.flags = [QPacket.PACKETFLAG.FLAG_ACK];
+    {
+        clients[i].IDsend = (uint)(1000 + i);
+        Invoke(h, "CacheResponse", Packet(clients[i].IDrecv, 1), Packet(clients[i].IDsend, (ushort)(distinct ? i + 1 : 1)), clients[i].Endpoint);
+    }
+    var ack = ClientAck(clients[0], Packet(clients[0].IDsend, 1));
     // Exercise the normal DATA ACK dispatch and wire parser, not just OnGotAck.
     h.ProcessPacket(ack.toBuffer(), clients[0].Endpoint);
     var remaining = Caches(h).Count;
     return (remaining == count - 1, $"After client 1 ACK: {remaining} caches remain; expected {count - 1}");
+}
+static (bool, string) AckGuard(string kind)
+{
+    using var socket = new UdpClient(AddressFamily.InterNetwork);
+    var h = Handler(socket);
+    var a = Client(h, 31001);
+    var b = Client(h, 31002);
+    a.IDsend = 2001;
+    b.IDsend = 2002;
+    var response = Packet(a.IDsend, 5);
+    Invoke(h, "CacheResponse", Packet(a.IDrecv, 9), response, a.Endpoint);
+    var ack = ClientAck(kind == "recipient" ? b : a, response);
+    switch (kind)
+    {
+        case "session":
+            ack.m_bySessionID++;
+            break;
+        case "sequence":
+            ack.uiSeqId++;
+            break;
+        case "stream":
+            ack.m_oSourceVPort = new(0x3e);
+            break;
+        case "unknown":
+            ack.m_uiSignature = 0xFFFFFFFF;
+            break;
+        case "signature":
+            a.IDsend++;
+            break; // Cached response belongs to the previous peer signature.
+    }
+    h.ProcessPacket(ack.toBuffer(), kind == "recipient" ? b.Endpoint : a.Endpoint);
+    return (Caches(h).Count == 1, $"Nonmatching ACK ({kind}) leaves {Caches(h).Count} response groups; expected 1");
+}
+static (bool, string) DuplicateAcks()
+{
+    using var socket = new UdpClient(AddressFamily.InterNetwork);
+    var h = Handler(socket);
+    var c = Client(h, 31001);
+    c.IDsend = 2001;
+    var first = Packet(c.IDsend, 1);
+    var second = Packet(c.IDsend, 2);
+    Invoke(h, "CacheResponse", Packet(c.IDrecv, 9), first, c.Endpoint);
+    Invoke(h, "CacheResponse", Packet(c.IDrecv, 9), second, c.Endpoint);
+    var ack = ClientAck(c, first).toBuffer();
+    h.ProcessPacket(ack, c.Endpoint);
+    h.ProcessPacket(ack, c.Endpoint);
+    var pending = Caches(h).Cast<object>().SelectMany(x => ((IList)Field(x, "ResponseList")).Cast<object>()).ToArray();
+    var keptSecond = pending.Length == 1 && ((QPacket)Field(pending[0], "Packet")).uiSeqId == 2;
+    h.ProcessPacket(ClientAck(c, second).toBuffer(), c.Endpoint);
+    return (keptSecond && Caches(h).Count == 0, $"Duplicate ACK preserves the next sequence: {keptSecond}; final ACK leaves {Caches(h).Count} groups");
+}
+static (bool, string) StreamAcks()
+{
+    using var socket = new UdpClient(AddressFamily.InterNetwork);
+    var h = Handler(socket);
+    var c = Client(h, 31001);
+    c.IDsend = 2001;
+    var a = Packet(c.IDsend, 1);
+    var b = Packet(c.IDsend, 1);
+    b.m_oDestinationVPort = new(0x3e);
+    Invoke(h, "CacheResponse", Packet(c.IDrecv, 9), a, c.Endpoint);
+    Invoke(h, "CacheResponse", Packet(c.IDrecv, 9), b, c.Endpoint);
+    h.ProcessPacket(ClientAck(c, a).toBuffer(), c.Endpoint);
+    var pending = Caches(h).Cast<object>().SelectMany(x => ((IList)Field(x, "ResponseList")).Cast<object>()).ToArray();
+    var isolated = pending.Length == 1 && ((QPacket)Field(pending[0], "Packet")).m_oDestinationVPort.toByte() == 0x3e;
+    h.ProcessPacket(ClientAck(c, b).toBuffer(), c.Endpoint);
+    return (isolated && Caches(h).Count == 0, $"Equal session/sequence on different streams isolated: {isolated}; final stream ACK leaves {Caches(h).Count} groups");
 }
 static (bool, string) InterleavedFragments()
 {
@@ -209,7 +311,85 @@ static List<byte[]> Drain(UdpClient receiver)
     }
     return packets;
 }
-static (bool, string) NotificationWire()
+static (bool, string) NotificationWire(int count)
+{
+    using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    var receivers = new List<UdpClient>();
+    try
+    {
+        var h = Handler(socket);
+        var clients = Enumerable.Range(0, count).Select(i =>
+        {
+            var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+            receivers.Add(receiver);
+            var client = Client(h, ((IPEndPoint)receiver.Client.LocalEndPoint!).Port);
+            client.IDsend = (uint)(2001 + i);
+            client.SessionID = 1;
+            return client;
+        }).ToArray();
+        foreach (var c in clients)
+            RMC.SendRMCCall(h, c, RMCProtocolId.NATTraversalService, 2,
+                new RMCPRequestDDL<StationURL>(new("prudp:/address=127.0.0.1;port=32001")));
+        h.Update();
+        var received = receivers.Select(x => Drain(x).Select(data => new QPacket(data).m_uiSignature).ToArray()).ToArray();
+        return (received.Select((packets, i) => packets.SequenceEqual([clients[i].IDsend])).All(x => x),
+            $"Actual datagrams per receiver: {string.Join('/', received.Select(x => x.Length))}; each of {count} recipients must get exactly its own notification");
+    }
+    finally { foreach (var receiver in receivers) receiver.Dispose(); }
+}
+static (bool, string) SameRecipientNotifications()
+{
+    using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    using var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    var h = Handler(socket);
+    var c = Client(h, ((IPEndPoint)receiver.Client.LocalEndPoint!).Port);
+    c.IDsend = 2001;
+    c.SessionID = 1;
+    for (var i = 0; i < 2; i++)
+        RMC.SendRMCCall(h, c, RMCProtocolId.NATTraversalService, 2,
+            new RMCPRequestDDL<StationURL>(new("prudp:/address=127.0.0.1;port=32001")));
+    h.Update();
+    var received = Drain(receiver).Select(x => new QPacket(x)).ToArray();
+    return (received.Length == 2 && received.All(x => x.m_uiSignature == c.IDsend) && received.Select(x => x.uiSeqId).Distinct().Count() == 2,
+        $"Same recipient received {received.Length} notifications with {received.Select(x => x.uiSeqId).Distinct().Count()} distinct sequences");
+}
+static (bool, string) SamePortRecipients()
+{
+    using var socket = new UdpClient(AddressFamily.InterNetwork);
+    var h = Handler(socket);
+    var a = h.NewQClient(new(IPAddress.Parse("127.0.0.1"), 31001));
+    var b = h.NewQClient(new(IPAddress.Parse("127.0.0.2"), 31001));
+    a.IDsend = 2001;
+    b.IDsend = 2002;
+    a.SessionID = b.SessionID = 1;
+    foreach (var c in new[] { a, b })
+        RMC.SendRMCCall(h, c, RMCProtocolId.NATTraversalService, 2,
+            new RMCPRequestDDL<StationURL>(new("prudp:/address=127.0.0.1;port=32001")));
+    return (Caches(h).Count == 2, $"Same port on two addresses produced {Caches(h).Count} recipient cache groups; expected 2");
+}
+static (bool, string) RetryControl()
+{
+    using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    using var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    var h = Handler(socket);
+    var c = Client(h, ((IPEndPoint)receiver.Client.LocalEndPoint!).Port);
+    c.IDsend = 2001;
+    var response = Packet(c.IDsend, 1, 0, "reply");
+    Invoke(h, "CacheResponse", Packet(c.IDrecv, 1), response, c.Endpoint);
+    h.Update();
+    var initial = Drain(receiver);
+    var cache = Caches(h)[0]!;
+    cache.GetType().GetField("ResendTime")!.SetValue(cache, DateTime.UtcNow.AddSeconds(-1));
+    h.Update();
+    var retried = Drain(receiver);
+    var ack = ClientAck(c, response);
+    h.ProcessPacket(ack.toBuffer(), c.Endpoint);
+    h.Update();
+    var afterAck = Drain(receiver);
+    return (initial.Count == 1 && retried.Count == 1 && initial[0].SequenceEqual(retried[0]) && afterAck.Count == 0 && Caches(h).Count == 0,
+        $"Initial/retried/post-ACK datagrams: {initial.Count}/{retried.Count}/{afterAck.Count}; retries are forced due without sleeping");
+}
+static (bool, string) ReplayRecipient()
 {
     using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
     using var receiverA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
@@ -219,36 +399,26 @@ static (bool, string) NotificationWire()
     var b = Client(h, ((IPEndPoint)receiverB.Client.LocalEndPoint!).Port);
     a.IDsend = 2001;
     b.IDsend = 2002;
-    a.SessionID = b.SessionID = 1;
-    foreach (var c in new[] { a, b })
-        RMC.SendRMCCall(h, c, RMCProtocolId.NATTraversalService, 2,
-            new RMCPRequestDDL<StationURL>(new("prudp:/address=127.0.0.1;port=32001")));
+    var requestA = Packet(a.IDrecv, 9, 0, "synthetic request");
+    requestA.m_oSourceVPort = new(0x3f);
+    requestA.m_oDestinationVPort = new(0x31);
+    var requestB = Packet(b.IDrecv, 9, 0, "synthetic request");
+    requestB.m_oSourceVPort = new(0x3f);
+    requestB.m_oDestinationVPort = new(0x31);
+    var wireA = requestA.toBuffer();
+    requestB.toBuffer();
+    Invoke(h, "CacheResponse", requestA, Packet(a.IDsend, 1, 0, "reply A"), a.Endpoint);
+    Invoke(h, "CacheResponse", requestB, Packet(b.IDsend, 1, 0, "reply B"), b.Endpoint);
     h.Update();
-    var receivedA = Drain(receiverA).Select(x => new QPacket(x).m_uiSignature).ToArray();
-    var receivedB = Drain(receiverB).Select(x => new QPacket(x).m_uiSignature).ToArray();
-    return (receivedA.SequenceEqual([a.IDsend]) && receivedB.SequenceEqual([b.IDsend]),
-        $"Actual loopback datagrams: A={receivedA.Length}, B={receivedB.Length}; A received packet addressed to B: {receivedA.Contains(b.IDsend)}");
-}
-static (bool, string) RetryControl()
-{
-    using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-    using var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-    var h = Handler(socket);
-    var c = Client(h, ((IPEndPoint)receiver.Client.LocalEndPoint!).Port);
-    Invoke(h, "CacheResponse", Packet(c.IDrecv, 1), Packet(2001, 1, 0, "reply"), c.Endpoint);
-    h.Update();
-    var initial = Drain(receiver);
-    var cache = Caches(h)[0]!;
-    cache.GetType().GetField("ResendTime")!.SetValue(cache, DateTime.UtcNow.AddSeconds(-1));
-    h.Update();
-    var retried = Drain(receiver);
-    var ack = Packet(c.IDrecv, 1);
-    ack.flags = [QPacket.PACKETFLAG.FLAG_ACK];
-    h.ProcessPacket(ack.toBuffer(), c.Endpoint);
-    h.Update();
-    var afterAck = Drain(receiver);
-    return (initial.Count == 1 && retried.Count == 1 && initial[0].SequenceEqual(retried[0]) && afterAck.Count == 0 && Caches(h).Count == 0,
-        $"Initial/retried/post-ACK datagrams: {initial.Count}/{retried.Count}/{afterAck.Count}; retries are forced due without sleeping");
+    var firstA = Drain(receiverA);
+    var firstB = Drain(receiverB);
+    h.ProcessPacket(wireA, a.Endpoint);
+    var replayA = Drain(receiverA).Select(x => new QPacket(x)).ToArray();
+    var replayB = Drain(receiverB);
+    return (firstA.Count == 1 && firstB.Count == 1 && replayA.Length == 2 && replayB.Count == 0
+            && replayA.Count(x => x.flags.Contains(QPacket.PACKETFLAG.FLAG_ACK)) == 1
+            && replayA.All(x => x.m_uiSignature == a.IDsend) && Caches(h).Count == 2,
+        $"Repeated A request: {replayA.Length} A datagrams (ACK + cached reply), {replayB.Count} B datagrams, {Caches(h).Count} pending groups");
 }
 static (bool, string) ExpiredCache()
 {

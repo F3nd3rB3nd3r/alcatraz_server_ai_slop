@@ -151,21 +151,32 @@ namespace QNetZ
 		}
 
 		// acknowledges packet
-		void OnGotAck(QPacket ackPacket)
+		private static bool MatchesAck(QReliableResponse cache, QPacket response, QClient client, QPacket ack)
+		{
+			// Incoming signatures identify the server-side connection; outgoing
+			// signatures identify its peer. They must not be compared directly.
+			return cache.Endpoint.Equals(client.Endpoint) &&
+				response.m_uiSignature == client.IDsend &&
+				response.m_bySessionID == ack.m_bySessionID &&
+				response.uiSeqId == ack.uiSeqId &&
+				response.m_oSourceVPort?.Equals(ack.m_oDestinationVPort) == true &&
+				response.m_oDestinationVPort?.Equals(ack.m_oSourceVPort) == true;
+		}
+
+		void OnGotAck(QClient client, QPacket ackPacket)
 		{
 			lock (CachedResponses)
 			{
-				Trace("ack.matches", packet: ackPacket, details: () => new
+				Trace("ack.matches", client, ackPacket, details: () => new
 				{
 					matches = CachedResponses.SelectMany(cr => cr.ResponseList
-						.Where(x => x.Packet.m_bySessionID == ackPacket.m_bySessionID && x.Packet.uiSeqId == ackPacket.uiSeqId)
+						.Where(x => MatchesAck(cr, x.Packet, client, ackPacket))
 						.Select(x => new { destination = cr.Endpoint.ToString(), response_signature = x.Packet.m_uiSignature, sequence = x.Packet.uiSeqId })).ToArray()
 				});
 				foreach (var cr in CachedResponses)
 				{
 					cr.ResponseList.RemoveAll(x =>
-						x.Packet.m_bySessionID == ackPacket.m_bySessionID &&
-						x.Packet.uiSeqId == ackPacket.uiSeqId);
+						MatchesAck(cr, x.Packet, client, ackPacket));
 				}
 
 				CachedResponses.RemoveAll(x => !x.ResponseList.Any());
@@ -173,7 +184,7 @@ namespace QNetZ
 		}
 
 		// returns response cache list by request packet
-		QReliableResponse GetCachedResponseByRequestPacket(QPacket packet)
+		QReliableResponse GetCachedResponseByRequestPacket(QPacket packet, IPEndPoint endpoint)
 		{
 			if (packet == null)
 				return null;
@@ -199,6 +210,7 @@ namespace QNetZ
 					x.SrcPacket.m_oDestinationVPort == null);
 
 				return CachedResponses.FirstOrDefault(cr =>
+						cr.Endpoint.Equals(endpoint) &&
 						cr.SrcPacket.type == packet.type &&
 						cr.SrcPacket.m_uiSignature == packet.m_uiSignature &&
 						cr.SrcPacket.m_oSourceVPort.type == packet.m_oSourceVPort.type &&
@@ -224,7 +236,9 @@ namespace QNetZ
 			if (responsePacket.flags.Contains(QPacket.PACKETFLAG.FLAG_ACK))
 				return false;
 
-			var cache = GetCachedResponseByRequestPacket(requestPacket);
+			// Server-initiated RMC calls use synthetic request headers shared by
+			// several clients. Never reuse another recipient's destination/cache.
+			var cache = GetCachedResponseByRequestPacket(requestPacket, ep);
 			if (cache == null)
 			{
 				lock (CachedResponses)

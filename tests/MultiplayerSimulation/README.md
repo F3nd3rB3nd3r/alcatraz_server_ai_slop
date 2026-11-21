@@ -5,7 +5,7 @@ The harness calls production backend methods with bounded synthetic inputs and l
 From the repository root:
 
 ```powershell
-dotnet run --project tests/MultiplayerSimulation -- --baseline
+dotnet run --project tests/MultiplayerSimulation -- --filter ack-
 dotnet run --project tests/MultiplayerSimulation -- --verify-diagnostics
 ```
 

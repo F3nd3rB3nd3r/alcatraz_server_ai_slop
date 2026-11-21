@@ -14,6 +14,12 @@ Opt-in JSONL diagnostics record connection/packet/ACK/session metadata, excludin
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --baseline`. Baseline characterization matches all 20 observations; 12 diagnostics checks pass. Full snapshot: 20 scenarios, 7 passes, 13 invariant failures, 0 harness errors.
 
+### 02. Isolate reliable replies and acknowledgements by recipient and stream
+
+Two synthetic server calls could share headers and inherit the first recipient endpoint. Reliable cache lookup now includes the intended recipient. Incoming ACK removal additionally matches that connection's outgoing signature, session, sequence and reversed virtual ports, preventing another connection/stream from clearing the response. Wire headers and retry intervals are preserved.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter ack-,notification-,cache-replay-,lost-ack-retry-control`. All 22 selected scenarios pass; 12 diagnostics checks pass. Full snapshot: 33 scenarios, 25 passes, 8 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

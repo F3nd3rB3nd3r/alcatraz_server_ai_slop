@@ -314,12 +314,12 @@ namespace QNetZ
 							// ack for reliable packets
 							if (packetIn.flags.Contains(QPacket.PACKETFLAG.FLAG_ACK))
 							{
-								OnGotAck(packetIn);
+								OnGotAck(client, packetIn);
 								break;
 							}
 
 							// force resend?
-							var cache = GetCachedResponseByRequestPacket(packetIn);
+							var cache = GetCachedResponseByRequestPacket(packetIn, client.Endpoint);
 							if (cache != null)
 							{
 								Trace("cache.replay", client, packetIn, details: () => new { destination = cache.Endpoint.ToString() });
