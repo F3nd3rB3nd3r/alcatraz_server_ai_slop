@@ -38,6 +38,12 @@ One handler previously mixed fragmented messages from different clients, acknowl
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter fragment-,interleaved-fragment-,ordered-fragment-`. All 23 selected scenarios pass; 21 diagnostics checks pass. Full snapshot: 94 scenarios, 87 passes, 7 invariant failures, 0 harness errors.
 
+### 06. Preserve player registration on repeated CONNECT and retire stale aliases
+
+Repeated CONNECT previously dropped the same PlayerInfo and removed it from the registry while reattaching it to the transport. Repeated association is now idempotent. Rebinding detaches the former current alias; account replacement drops only a genuinely current prior owner. Ticket parsing/authentication behavior is unchanged. Synthetic ticket-stub tests are not authentication validation.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter connect-,duplicate-connect-`. All 23 selected scenarios pass; 24 diagnostics checks pass. Full snapshot: 116 scenarios, 110 passes, 6 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

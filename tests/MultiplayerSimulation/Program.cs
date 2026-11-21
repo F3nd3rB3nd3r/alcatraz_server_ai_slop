@@ -66,6 +66,8 @@ foreach (var (kind, originalViolation) in NatProbeChecks.Cases)
     Check("nat-probe-" + kind, originalViolation, () => NatProbeChecks.Run(kind));
 foreach (var (kind, originalViolation) in FragmentIsolationChecks.Cases)
     Check("fragment-" + kind, originalViolation, () => FragmentIsolationChecks.Run(kind));
+foreach (var (kind, originalViolation) in ConnectAssociationChecks.Cases)
+    Check("connect-" + kind, originalViolation, () => ConnectAssociationChecks.Run(kind));
 if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");

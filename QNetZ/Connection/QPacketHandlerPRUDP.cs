@@ -107,21 +107,51 @@ namespace QNetZ
 				return [];
 			}
 
+			var previousPlayer = client.PlayerInfo;
+			var previousConnection = playerInfo.Client;
+			bool samePlayer = ReferenceEquals(previousPlayer, playerInfo);
+			string operation = previousPlayer != null && !samePlayer ? "replace" :
+				samePlayer && ReferenceEquals(previousConnection, client) ? "repeat" :
+				previousConnection != null && ReferenceEquals(previousConnection.PlayerInfo, playerInfo) ? "rebind" : "initial";
 			Trace("connection.association.begin", client, p, details: () => new
 			{
 				requested_pid = userPrincipalID, connection_id = connectionId,
-				previous_connection = playerInfo.Client?.IDrecv,
-				repeated_association = ReferenceEquals(client.PlayerInfo, playerInfo)
+				previous_connection = previousConnection?.IDrecv,
+				repeated_association = samePlayer, operation
 			});
-			// drop player in case when of new account but same address
-			if (client.PlayerInfo != null)
+			string previousPlayerAction = "none";
+			// A retry must not remove the target from the registry or run its cleanup.
+			// A stale alias must not drop a player now owned by another transport.
+			if (previousPlayer != null && !samePlayer)
 			{
-				NetworkPlayers.DropPlayerInfo(client.PlayerInfo);
+				if (ReferenceEquals(previousPlayer.Client, client))
+				{
+					previousPlayerAction = "drop_current";
+					NetworkPlayers.DropPlayerInfo(previousPlayer);
+				}
+				else
+				{
+					previousPlayerAction = "detach_stale";
+					client.PlayerInfo = null;
+				}
+			}
+
+			uint? detachedPreviousConnection = null;
+			if (previousConnection != null && !ReferenceEquals(previousConnection, client)
+				&& ReferenceEquals(previousConnection.PlayerInfo, playerInfo))
+			{
+				previousConnection.PlayerInfo = null;
+				detachedPreviousConnection = previousConnection.IDrecv;
 			}
 
 			playerInfo.Client = client;
 			client.PlayerInfo = playerInfo;
-			Trace("connection.association.complete", client, p);
+			Trace("connection.association.complete", client, p, details: () => new
+			{
+				operation, previous_player_action = previousPlayerAction,
+				detached_previous_connection = detachedPreviousConnection,
+				registry_present = NetworkPlayers.Players.Contains(playerInfo)
+			});
 
 			uint responseCode = Helper.ReadU32(m);
 

@@ -68,6 +68,14 @@ static class DiagnosticsChecks
         var fragmentChecks = new[] { "session-isolation", "ack-recipient-isolation", "dropped-owner-cleanup", "inactive-owner-cleanup" }
             .Select(kind => FragmentIsolationChecks.Run(kind, secret)).Append(FragmentIsolationChecks.Run("rmc-dispatch-2")).ToArray();
         Assert(fragmentChecks.All(x => x.Item1), "fragment isolation, transport cleanup and wire dispatch pass with diagnostics enabled");
+        var connectChecks = ConnectAssociationChecks.Cases.Select(item =>
+        {
+            NetworkPlayers.Players.Clear();
+            GameSessions.SessionList.Clear();
+            PartySessions.GatheringList.Clear();
+            return ConnectAssociationChecks.Run(item.Kind);
+        }).ToArray();
+        Assert(connectChecks.All(x => x.Item1), "CONNECT retries, rebinds and account replacement pass with diagnostics enabled");
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -105,6 +113,16 @@ static class DiagnosticsChecks
             .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
         Assert(new[] { "disconnect", "inactivity" }.All(reason => fragmentDrops.Any(x => x.GetProperty("reason").GetString() == reason && x.GetProperty("pending").GetInt32() == 1)),
             "fragment discard reasons and pending counts recorded for dropped transports");
+        var associations = records.Where(x => x.RootElement.GetProperty("event").GetString() == "connection.association.complete")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(new[] { "initial", "repeat", "rebind", "replace" }.All(operation => associations.Any(x => x.GetProperty("operation").GetString() == operation))
+            && new[] { "none", "drop_current", "detach_stale" }.All(action => associations.Any(x => x.GetProperty("previous_player_action").GetString() == action))
+            && associations.Any(x => x.GetProperty("detached_previous_connection").ValueKind == JsonValueKind.Number)
+            && associations.All(x => x.GetProperty("registry_present").GetBoolean()),
+            "CONNECT operation, cleanup ownership, retired alias and registry presence recorded");
+        Assert(associations.Length > 0 && associations.All(x => x.EnumerateObject().Select(p => p.Name).Order()
+            .SequenceEqual(new[] { "operation", "previous_player_action", "detached_previous_connection", "registry_present" }.Order())),
+            "CONNECT completion details restricted to classification, numeric connection ID and registry presence");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");
