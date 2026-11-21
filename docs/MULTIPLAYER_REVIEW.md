@@ -44,6 +44,12 @@ Repeated CONNECT previously dropped the same PlayerInfo and removed it from the 
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter connect-,duplicate-connect-`. All 23 selected scenarios pass; 24 diagnostics checks pass. Full snapshot: 116 scenarios, 110 passes, 6 invariant failures, 0 harness errors.
 
+### 07. Scope party event and endpoint cleanup to the departing player
+
+An unrelated participation update could delete a newly created empty party before its owner joined, causing later invites to find no lobby. Event cleanup also consulted the wrong membership set and removed unrelated empty records. Cleanup now targets actual former memberships; explicit owner-drop cleanup retires pending creations, including creations before participation. Endpoint cleanup compares address and port, preserving another peer sharing an address. The datastore cleanup hook is registered at creation.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter cleanup-,gathering-create-,unrelated-empty-session,same-ip-different-port-cleanup,different-ip-cleanup-control,disconnect-cleanup-grace-control`. All 53 selected scenarios pass; 24 diagnostics checks pass. Full snapshot: 174 scenarios, 165 passes, 9 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

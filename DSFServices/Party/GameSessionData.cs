@@ -28,14 +28,13 @@ namespace DSFServices
 			MultiplayerDiagnostics.Participation("session.participation.begin", playerInfo, null, newSessionKey?.m_sessionID, newSessionKey?.m_typeID);
 			// delete player from old sessions
 			var participatingSessions = SessionList.Where(x =>
-				x.Participants.Contains(playerInfo.PID) &&
-				x.PublicParticipants.Contains(playerInfo.PID) &&
-				newSessionKey != null ? !x.IsMatchingKey(newSessionKey) : true
-			);
+				(x.Participants.Contains(playerInfo.PID) || x.PublicParticipants.Contains(playerInfo.PID)) &&
+				(newSessionKey == null || !x.IsMatchingKey(newSessionKey))
+			).ToArray();
 
 			foreach (var session in participatingSessions)
 			{
-				session.HostURLs.RemoveAll(x => x.Compare(playerInfo.Url));
+				session.HostURLs.RemoveAll(x => PlayerEndpoint.Matches(x, playerInfo.Url));
 				RemovePlayerFromSession(session, playerInfo.PID);
 			}
 
@@ -54,17 +53,27 @@ namespace DSFServices
 				}
 			}
 
-			// delete all outdated empty sessions
-			SessionList.RemoveAll(gathering => {
-				if (gathering.TotalParticipantCount > 0)
-					return false;
-
-				QLog.WriteLine(1, $"UpdateSessionParticipation: Auto-deleted session {gathering.Id}");
-				return true;
-			});
+			// Preserve creations awaiting AddParticipants and other players' state.
+			RemoveEmptySessions(participatingSessions, playerInfo.PID, "last_member_left");
 
 			playerInfo.GameData().CurrentSession = newSessionKey;
 			MultiplayerDiagnostics.Participation("session.participation.complete", playerInfo, null, newSessionKey?.m_sessionID, newSessionKey?.m_typeID);
+		}
+
+		public static void CleanupOwnedEmptySessions(PlayerInfo playerInfo)
+		{
+			RemoveEmptySessions(SessionList.Where(x => x.HostPID == playerInfo.PID), playerInfo.PID, "owner_dropped");
+		}
+
+		private static void RemoveEmptySessions(IEnumerable<GameSessionData> candidates, uint pid, string reason)
+		{
+			foreach (var session in candidates.ToArray())
+			{
+				if (session.TotalParticipantCount != 0 || !SessionList.Remove(session))
+					continue;
+				NetworkDiagnostics.Record("session.cleanup.removed", () => new { pid, session = session.Id, session_type = session.TypeID, reason });
+				QLog.WriteLine(1, $"UpdateSessionParticipation: Auto-deleted session {session.Id}");
+			}
 		}
 	}
 

@@ -23,6 +23,8 @@ namespace DSFServices.Services
 		public RMCResult CreateSession(GameSession gameSession)
 		{
 			var plInfo = Context.Client.PlayerInfo;
+			// Register drop cleanup even if AddParticipants never follows creation.
+			plInfo.GameData();
 			var newSession = new GameSessionData();
 			GameSessions.SessionList.Add(newSession);
 

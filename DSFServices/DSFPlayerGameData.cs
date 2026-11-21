@@ -24,9 +24,10 @@ namespace DSFServices
 			// when player dropped, game data will be destroyed
 			// so we need to remove player from game session and gatherings
 
-			// BUG: there is a bug in dropping sessions
 			PartySessions.UpdateGatheringParticipation(Owner, uint.MaxValue);
+			PartySessions.CleanupOwnedEmptyGatherings(Owner);
 			GameSessions.UpdateSessionParticipation(Owner, null, false);
+			GameSessions.CleanupOwnedEmptySessions(Owner);
 		}
 	}
 

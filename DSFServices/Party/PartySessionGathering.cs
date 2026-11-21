@@ -23,7 +23,7 @@ namespace DSFServices
 			var oldGatherings = GatheringList.Where(x => x.Participants.Contains(playerInfo.PID) && x.Session.m_idMyself != newGatheringId).ToArray();			
 			foreach (var gathering in oldGatherings)
 			{
-				gathering.Urls.RemoveAll(x => x.Compare(playerInfo.Url));
+				gathering.Urls.RemoveAll(x => PlayerEndpoint.Matches(x, playerInfo.Url));
 				gathering.Participants.Remove(playerInfo.PID);
 			}
 
@@ -32,17 +32,29 @@ namespace DSFServices
 			if(newGathering != null && !newGathering.Participants.Contains(playerInfo.PID))
 				newGathering.Participants.Add(playerInfo.PID);
 
-			// delete all outdated empty gatherings
-			GatheringList.RemoveAll(gathering => {
-				if (gathering.Participants.Count > 0)
-					return false;
-
-				QLog.WriteLine(1, $"Auto-deleted gathering {gathering.Session.m_idMyself}");
-				return true;
-			});
+			// A different player may have just registered an empty gathering and
+			// not yet sent Participate. Retire only records this update emptied.
+			RemoveEmptyGatherings(oldGatherings, playerInfo.PID, "last_member_left");
 
 			playerInfo.GameData().CurrentGatheringId = newGatheringId;
 			MultiplayerDiagnostics.Participation("gathering.participation.complete", playerInfo, newGatheringId, null, null);
+		}
+
+		public static void CleanupOwnedEmptyGatherings(PlayerInfo playerInfo)
+		{
+			RemoveEmptyGatherings(GatheringList.Where(x => x.Session.m_pidOwner == playerInfo.PID),
+				playerInfo.PID, "owner_dropped");
+		}
+
+		private static void RemoveEmptyGatherings(IEnumerable<PartySessionGathering> candidates, uint pid, string reason)
+		{
+			foreach (var gathering in candidates.ToArray())
+			{
+				if (gathering.Participants.Count != 0 || !GatheringList.Remove(gathering))
+					continue;
+				NetworkDiagnostics.Record("gathering.cleanup.removed", () => new { pid, gathering = gathering.Session.m_idMyself, reason });
+				QLog.WriteLine(1, $"Auto-deleted gathering {gathering.Session.m_idMyself}");
+			}
 		}
 	}
 

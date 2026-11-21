@@ -52,6 +52,8 @@ Check("url-registration-order", true, UrlRegistration);
 Check("same-ip-different-port-cleanup", true, () => EndpointCleanup(true));
 Check("different-ip-cleanup-control", false, () => EndpointCleanup(false));
 Check("unrelated-empty-session", true, EmptySession);
+Check("gathering-create-migrate-invite", true, () => CreatedGatheringInvite(true));
+Check("gathering-create-invite-control", false, () => CreatedGatheringInvite(false));
 Check("disconnect-cleanup-grace-control", false, CleanupGrace);
 Check("hosted-callback-reentry-reliable-send", true, HostedCallbackChecks.ReliableReentry);
 Check("hosted-callback-overlap-receive-owner", true, HostedCallbackChecks.ReceiveOwnership);
@@ -68,6 +70,10 @@ foreach (var (kind, originalViolation) in FragmentIsolationChecks.Cases)
     Check("fragment-" + kind, originalViolation, () => FragmentIsolationChecks.Run(kind));
 foreach (var (kind, originalViolation) in ConnectAssociationChecks.Cases)
     Check("connect-" + kind, originalViolation, () => ConnectAssociationChecks.Run(kind));
+foreach (var (kind, originalViolation) in CleanupIsolationChecks.Cases)
+    Check("cleanup-" + kind, originalViolation, () => CleanupIsolationChecks.Run(kind));
+foreach (var (kind, originalViolation) in RetryExpiryChecks.Cases)
+    Check("expiry-" + kind, originalViolation, () => RetryExpiryChecks.Run(kind));
 if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");
@@ -548,6 +554,57 @@ static (bool, string) EmptySession()
     }, false);
     return (GameSessions.SessionList.Contains(pending), $"Unrelated newly created session survives another join: {GameSessions.SessionList.Contains(pending)}");
 }
+static (bool, string) CreatedGatheringInvite(bool migrateOtherPlayer)
+{
+    // Reproduce the observed create -> another player's migration -> participate
+    // -> invite sequence, without changing the implementation or requiring a game.
+    using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    using var receiverA = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    using var receiverB = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    var h = Handler(socket);
+    var a = Player(1001, ((IPEndPoint)receiverA.Client.LocalEndPoint!).Port);
+    var b = Player(1002, ((IPEndPoint)receiverB.Client.LocalEndPoint!).Port);
+    h.Clients.AddRange([a.Client, b.Client]);
+    var old = new PartySessionGathering(new()
+    {
+        m_idMyself = 100,
+        m_pidOwner = a.PID,
+        m_pidHost = a.PID
+    });
+    old.Participants.Add(a.PID);
+    var other = new PartySessionGathering(new()
+    {
+        m_idMyself = 101,
+        m_pidOwner = b.PID,
+        m_pidHost = b.PID
+    });
+    other.Participants.Add(b.PID);
+    PartySessions.GatheringList.AddRange([old, other]);
+    a.GameData().CurrentGatheringId = 100;
+    b.GameData().CurrentGatheringId = 101;
+    var match = MatchMaking(h, a.Client);
+    var created = (RMCResult)Invoke(match, "RegisterGathering", new AnyData<HermesPartySession>(new HermesPartySession()))!;
+    var pendingId = BitConverter.ToUInt32(created.Response.ToBuffer());
+    if (migrateOtherPlayer)
+    {
+        var type = typeof(DSFPlayerGameData).Assembly.GetType("DSFServices.Services.PartyService")!;
+        var party = (RMCServiceBase)Activator.CreateInstance(type, nonPublic: true)!;
+        party.Context = new(new RMCPacket(), h, b.Client, Packet(b.Client.IDrecv, 1));
+        // The captured late request names the former shared lobby, while B
+        // already belongs to its new lobby. Keep that same ordering here.
+        Invoke(party, "MigrateTo", b.PID, 100u, 101u);
+    }
+    var participated = (RMCResult)Invoke(match, "Participate", pendingId, "synthetic")!;
+    var invited = (RMCResult)Invoke(match, "Invite", pendingId, new List<uint> { b.PID }, "synthetic")!;
+    h.Update();
+    var notices = NatProbeChecks.Drain(receiverB);
+    var exists = PartySessions.GatheringList.Any(g => g.Session.m_idMyself == pendingId && g.Participants.Contains(a.PID));
+    var accepted = participated.Response.ToBuffer().SequenceEqual(new byte[] { 1 });
+    var sent = invited.Response.ToBuffer().SequenceEqual(new byte[] { 1 });
+    return (exists && accepted && sent && notices.Length == 1,
+        $"Pending gathering retained/joined {exists}; Participate result {accepted}; Invite result {sent}; recipient datagrams {notices.Length}/1; unrelated migration {migrateOtherPlayer}");
+}
+
 static (bool, string) CleanupGrace()
 {
     var p = Player(1, 31001);

@@ -27,6 +27,8 @@ namespace DSFServices.Services
 
 			if(anyGathering.data != null)
 			{
+				// Register drop cleanup even if Participate never follows creation.
+				plInfo.GameData();
 				var gathering = anyGathering.data;
 				gathering.m_idMyself = ++GatheringIdCounter;
 				gathering.m_pidOwner = playerPid;
