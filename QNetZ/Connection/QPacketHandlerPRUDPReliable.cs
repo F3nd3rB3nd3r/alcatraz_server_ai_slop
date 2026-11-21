@@ -243,6 +243,7 @@ namespace QNetZ
 
 				return CachedResponses.FirstOrDefault(cr =>
 						cr.Endpoint.Equals(endpoint) &&
+						ReferenceEquals(cr.SrcPacket.ResponseCacheIdentity, packet.ResponseCacheIdentity) &&
 						cr.SrcPacket.type == packet.type &&
 						cr.SrcPacket.m_uiSignature == packet.m_uiSignature &&
 						cr.SrcPacket.m_oSourceVPort.type == packet.m_oSourceVPort.type &&
@@ -289,6 +290,7 @@ namespace QNetZ
 				cache.ResponseList.Add(new QPacketState(responsePacket));
 				Trace("cache.enqueue", packet: responsePacket, endpoint: ep, details: () => new
 				{
+					cache_origin = requestPacket.ResponseCacheIdentity == null ? "client_request" : "server_call",
 					cached_destination = cache.Endpoint.ToString(), destination_matches = cache.Endpoint.Equals(ep),
 					request_signature = requestPacket?.m_uiSignature, request_session = requestPacket?.m_bySessionID,
 					request_sequence = requestPacket?.uiSeqId, expires_utc = cache.DropTime, pending = cache.ResponseList.Count
@@ -306,6 +308,17 @@ namespace QNetZ
                 foreach (var crp in cache.ResponseList)
 				{
 					var data = crp.Packet.toBuffer();
+					// A selected cache can expire before send, including through the
+					// direct replay path. Never transmit it past its existing TTL.
+					if (cache.SrcPacket == null || DateTime.UtcNow >= cache.DropTime)
+					{
+						Trace("cache.retry.skipped", packet: crp.Packet, endpoint: cache.Endpoint, details: () => new
+						{
+							reason = cache.SrcPacket == null ? "missing_request" : "expired",
+							expires_utc = cache.DropTime
+						});
+						return;
+					}
 					Trace("cache.transmit", packet: crp.Packet, endpoint: cache.Endpoint, details: () => new
 					{
 						prior_send_count = crp.ReSendCount, expires_utc = cache.DropTime, due_utc = cache.ResendTime,
@@ -325,11 +338,12 @@ namespace QNetZ
 			QReliableResponse[] reliableResend;
 			lock (CachedResponses)
 			{
-				reliableResend = CachedResponses.Where(x => x.SrcPacket != null && DateTime.UtcNow >= x.ResendTime).ToArray();
+				var now = DateTime.UtcNow;
 				if (NetworkDiagnostics.Enabled)
-					foreach (var expiring in CachedResponses.Where(x => x.SrcPacket == null || DateTime.UtcNow >= x.DropTime))
+					foreach (var expiring in CachedResponses.Where(x => x.SrcPacket == null || now >= x.DropTime))
 						Trace("cache.expire", endpoint: expiring.Endpoint, details: () => new { pending = expiring.ResponseList.Count, expires_utc = expiring.DropTime });
-				int droppedPackets = CachedResponses.RemoveAll(x => x.SrcPacket == null || DateTime.UtcNow >= x.DropTime);
+				int droppedPackets = CachedResponses.RemoveAll(x => x.SrcPacket == null || now >= x.DropTime);
+				reliableResend = CachedResponses.Where(x => now >= x.ResendTime).ToArray();
 
 				if(droppedPackets > 0)
 					QLog.WriteLine(5, $"Dropped {droppedPackets} reliable packets");

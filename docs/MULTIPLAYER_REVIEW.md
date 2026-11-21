@@ -50,6 +50,12 @@ An unrelated participation update could delete a newly created empty party befor
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter cleanup-,gathering-create-,unrelated-empty-session,same-ip-different-port-cleanup,different-ip-cleanup-control,disconnect-cleanup-grace-control`. All 53 selected scenarios pass; 24 diagnostics checks pass. Full snapshot: 174 scenarios, 165 passes, 9 invariant failures, 0 harness errors.
 
+### 08. Stop expired retries and give each server call an independent send schedule
+
+A response selected before expiry could be sent after its deadline; the send path now rechecks the existing TTL. Separately, a new server call could inherit an older call's retry schedule. A nonserialized per-call object identity separates its cache while its own fragments share scheduling. Client request replay remains unchanged. Tests force the expiry boundary and pending-call overlap while preserving old retry deadlines.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter expiry-,first-send-,expired-cache-late-send`. All 18 selected scenarios pass; 29 diagnostics checks pass. Full snapshot: 182 scenarios, 179 passes, 3 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

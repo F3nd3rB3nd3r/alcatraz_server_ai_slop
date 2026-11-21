@@ -76,6 +76,18 @@ static class DiagnosticsChecks
             return ConnectAssociationChecks.Run(item.Kind);
         }).ToArray();
         Assert(connectChecks.All(x => x.Item1), "CONNECT retries, rebinds and account replacement pass with diagnostics enabled");
+        var cleanupChecks = CleanupIsolationChecks.Cases.Select(item =>
+        {
+            NetworkPlayers.Players.Clear();
+            GameSessions.SessionList.Clear();
+            PartySessions.GatheringList.Clear();
+            return CleanupIsolationChecks.Run(item.Kind);
+        }).ToArray();
+        Assert(cleanupChecks.All(x => x.Item1), "lobby/event/endpoint cleanup and owner disconnect pass with diagnostics enabled");
+        Assert(RetryExpiryChecks.Cases.Select(item => RetryExpiryChecks.Run(item.Kind)).All(x => x.Item1),
+            "retry expiry, live deadline boundary and valid-send controls pass with diagnostics enabled");
+        Assert(NotificationFirstSendChecks.Cases.Select(item => NotificationFirstSendChecks.Run(item.Kind)).All(x => x.Item1),
+            "independent first sends preserve older retry schedules with diagnostics enabled");
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -123,6 +135,18 @@ static class DiagnosticsChecks
         Assert(associations.Length > 0 && associations.All(x => x.EnumerateObject().Select(p => p.Name).Order()
             .SequenceEqual(new[] { "operation", "previous_player_action", "detached_previous_connection", "registry_present" }.Order())),
             "CONNECT completion details restricted to classification, numeric connection ID and registry presence");
+        Assert(new[] { "gathering", "session" }.All(kind =>
+        {
+            var removals = records.Where(x => x.RootElement.GetProperty("event").GetString() == kind + ".cleanup.removed")
+                .Select(x => x.RootElement.GetProperty("data")).ToArray();
+            var fields = kind == "gathering" ? new[] { "pid", "gathering", "reason" } : new[] { "pid", "session", "session_type", "reason" };
+            return new[] { "last_member_left", "owner_dropped" }.All(reason => removals.Any(x => x.GetProperty("reason").GetString() == reason))
+                && removals.All(x => x.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(fields.Order()));
+        }), "scoped cleanup removals record owner, record key and allowlisted reason only");
+        var retrySkips = records.Where(x => x.RootElement.GetProperty("event").GetString() == "cache.retry.skipped")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(retrySkips.Length >= 2 && retrySkips.All(x => x.GetProperty("reason").GetString() == "expired")
+            && Has("cache.expire"), "expired retry skips and scheduled cache retirement are explicit");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");
