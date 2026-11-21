@@ -13,7 +13,7 @@ namespace Alcatraz.GameServices.Services
 	public abstract class QPRUDPServiceBase : IHostedService
 	{
 		private Timer _timer;
-		private int _diagnosticCallbacks;
+		private int _processing;
 		protected ILogger _logger;
 		public abstract string ServiceName { get; }
 		public abstract ushort ListenPort { get; }
@@ -62,11 +62,17 @@ namespace Alcatraz.GameServices.Services
 
 		protected void Process(object state)
 		{
+			// A timer may fire again before its previous callback finishes. Keep
+			// update/retry selection and receive-task ownership in one callback;
+			// the next tick can process queued work without blocking this tick.
+			if (Interlocked.CompareExchange(ref _processing, 1, 0) != 0)
+			{
+				packetHandler.Trace("service.callback.skipped", details: () => new { reason = "busy" });
+				return;
+			}
+
 			var diagnostic = NetworkDiagnostics.Enabled;
 			var started = diagnostic ? Stopwatch.GetTimestamp() : 0;
-			var active = diagnostic ? Interlocked.Increment(ref _diagnosticCallbacks) : 0;
-			if (active > 1)
-				packetHandler.Trace("service.callback.overlap", details: () => new { active_callbacks = active });
 			try
 			{
 				packetHandler.Update();
@@ -102,12 +108,12 @@ namespace Alcatraz.GameServices.Services
             }
 			finally
 			{
+				Volatile.Write(ref _processing, 0);
 				if (diagnostic)
 				{
-					Interlocked.Decrement(ref _diagnosticCallbacks);
 					var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-					if (active > 1 || elapsed >= 100)
-						packetHandler.Trace("service.callback.complete", details: () => new { elapsed_ms = elapsed, active_at_entry = active });
+					if (elapsed >= 100)
+						packetHandler.Trace("service.callback.complete", details: () => new { elapsed_ms = elapsed, active_at_entry = 1 });
 				}
 			}
 		}

@@ -56,6 +56,8 @@ static class DiagnosticsChecks
         packet.payload = rmc.ToBuffer();
         h.ProcessPacket(packet.toBuffer(), client.Endpoint);
         h.Update();
+        Assert(HostedCallbackChecks.ReceiveOwnership().Item1, "hosted callback retains receive ownership with diagnostics enabled");
+        Assert(HostedCallbackChecks.ReliableReentry().Item1, "hosted callback prevents duplicate selection with diagnostics enabled");
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -71,6 +73,9 @@ static class DiagnosticsChecks
         Assert(Has("udp.receive") && Has("packet.receive") && Has("udp.send.complete"), "wire receive and actual send metadata recorded");
         Assert(Has("rmc.request.begin") && Has("rmc.request.returned") && Has("nat.result"), "RMC execution and NAT result correlated");
         Assert(Has("rmc.unimplemented"), "unimplemented service path explicit");
+        var skipped = records.Where(x => x.RootElement.GetProperty("event").GetString() == "service.callback.skipped").ToArray();
+        Assert(skipped.Length == 9 && skipped.All(x => x.RootElement.GetProperty("data").GetProperty("details").GetProperty("reason").GetString() == "busy")
+            && !Has("service.callback.overlap"), "nine prevented callback entries recorded as busy skips, with no executing overlap");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");

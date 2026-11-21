@@ -53,6 +53,15 @@ Check("same-ip-different-port-cleanup", true, () => EndpointCleanup(true));
 Check("different-ip-cleanup-control", false, () => EndpointCleanup(false));
 Check("unrelated-empty-session", true, EmptySession);
 Check("disconnect-cleanup-grace-control", false, CleanupGrace);
+Check("hosted-callback-reentry-reliable-send", true, HostedCallbackChecks.ReliableReentry);
+Check("hosted-callback-overlap-receive-owner", true, HostedCallbackChecks.ReceiveOwnership);
+Check("hosted-callback-independent-services-control", false, HostedCallbackChecks.IndependentServices);
+Check("hosted-callback-error-recovery-control", false, HostedCallbackChecks.ErrorRecovery);
+Check("nat-probe-observed-endpoint-control", false, () => NatProbeLookup("observed"));
+Check("nat-probe-alternate-address", true, () => NatProbeLookup("address"));
+Check("nat-probe-alternate-port", true, () => NatProbeLookup("port"));
+Check("nat-probe-alternate-then-observed-control", false, () => NatProbeLookup("both"));
+Check("nat-probe-unknown-target-control", false, () => NatProbeLookup("unknown"));
 if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");
@@ -147,6 +156,52 @@ static RMCServiceBase MatchMaking(QPacketHandlerPRUDP h, QClient c)
     var service = (RMCServiceBase)Activator.CreateInstance(type, nonPublic: true)!;
     service.Context = new(new RMCPacket(), h, c, Packet(c.IDrecv, 1));
     return service;
+}
+
+static (bool, string) NatProbeLookup(string kind)
+{
+    using var socket = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    using var receiver = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+    var h = Handler(socket);
+    var caller = Client(h, 31001);
+    var target = Client(h, ((IPEndPoint)receiver.Client.LocalEndPoint!).Port);
+    foreach (var c in new[] { caller, target })
+    {
+        c.State = QClient.StateType.Active;
+        c.IDsend = c.IDrecv + 100;
+        c.SessionID = 1;
+        c.PlayerInfo = NetworkPlayers.CreatePlayerInfo(c);
+        c.PlayerInfo.PID = ReferenceEquals(c, caller) ? 1u : 2u;
+    }
+    StationURL Url(bool alternate) => new("prudp", alternate && kind != "port" ? "192.0.2.20" : target.Endpoint.Address.ToString(),
+        new Dictionary<string, int>
+        {
+            ["port"] = alternate && kind == "port" ? (target.Endpoint.Port == 65535 ? 65534 : target.Endpoint.Port + 1) : target.Endpoint.Port,
+            ["RVCID"] = (int)(kind == "unknown" ? target.PlayerInfo.RVCID + 999 : target.PlayerInfo.RVCID),
+            ["type"] = 3
+        });
+    var service = new RDVServices.Services.NATTraversalService
+    {
+        Context = new(new RMCPacket(), h, caller, Packet(caller.IDrecv, 1))
+    };
+    var urls = kind == "both" ? new[] { Url(true), Url(false) } : new[] { Url(kind != "observed") };
+    var result = service.RequestProbeInitiation(urls);
+    h.Update();
+    var received = Drain(receiver).Select(x => new QPacket(x)).ToArray();
+    var expected = kind == "unknown" ? 0 : 1;
+    var valid = received.All(p =>
+    {
+        var rmc = new RMCPacket(p);
+        using var body = new MemoryStream(p.payload);
+        body.Position = rmc._afterProtocolOffset;
+        var station = new StationURL();
+        station.Read(body);
+        return p.m_uiSignature == target.IDsend && rmc.isRequest && rmc.proto == RMCProtocolId.NATTraversalService
+            && rmc.methodID == 2 && station.Address == caller.Endpoint.Address.ToString()
+            && station["port"] == caller.Endpoint.Port && station["RVCID"] == (int)caller.PlayerInfo.RVCID;
+    });
+    return (result.Error == 0 && received.Length == expected && valid,
+        $"Target {kind}: {received.Length} InitiateProbe datagrams, expected {expected}; caller URL/header valid: {valid}; request error: {result.Error}");
 }
 
 static (bool, string) AckIsolation(int count, bool distinct)

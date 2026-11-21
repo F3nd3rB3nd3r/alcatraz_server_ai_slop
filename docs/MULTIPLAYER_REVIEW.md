@@ -20,6 +20,12 @@ Two synthetic server calls could share headers and inherit the first recipient e
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter ack-,notification-,cache-replay-,lost-ack-retry-control`. All 22 selected scenarios pass; 12 diagnostics checks pass. Full snapshot: 33 scenarios, 25 passes, 8 invariant failures, 0 harness errors.
 
+### 03. Serialize hosted PRUDP callbacks per service
+
+A timer callback can overlap itself, selecting a pending response twice or sharing ownership of the receive task. A per-service Interlocked guard covers update/retry selection and receive-task consumption, releases in finally, and records busy skips. Tests force reentry and competing callbacks without timing-dependent sleeps; independent services remain independent.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter hosted-callback-`. All 4 selected scenarios pass; 15 diagnostics checks pass. Full snapshot: 42 scenarios, 32 passes, 10 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.
