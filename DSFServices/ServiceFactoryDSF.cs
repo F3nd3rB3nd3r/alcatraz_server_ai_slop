@@ -10,6 +10,7 @@ namespace DSFServices
 	{
 		public static void RegisterDSFServices()
 		{
+			QNetZ.RMC.DiagnosticSnapshot = context => MultiplayerDiagnostics.Snapshot();
 			ServiceFactoryRDV.RegisterRDVServices();
 
 			Assembly asm = Assembly.GetExecutingAssembly();

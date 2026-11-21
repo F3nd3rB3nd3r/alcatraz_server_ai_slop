@@ -180,6 +180,7 @@ namespace RDVServices.Services
 						pbufResponse = new byte[] { }
 					};
 
+					Context.Handler.Trace("authentication.result", Context.Client, details: () => new { pid = user?.Id, result = (uint)loginCode });
 					return Result(loginData);
 				}
 				else
@@ -204,6 +205,7 @@ namespace RDVServices.Services
 						pbufResponse = kerberos.ToBuffer(Constants.UbiDummyPassword)
 					};
 
+					Context.Handler.Trace("authentication.result", Context.Client, details: () => new { pid = playerInfo.PID, result = (uint)loginCode });
 					return Result(loginData);
 				}
 			}

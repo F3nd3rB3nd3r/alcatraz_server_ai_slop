@@ -48,6 +48,10 @@ namespace QNetZ.Interfaces
 		// This is for reverse-engineering
 		protected void UNIMPLEMENTED(string additionalMessage = "")
 		{
+			_context.Handler.Trace("rmc.unimplemented", _context.Client, details: () => new
+			{
+				protocol = (uint)_context.RMC.proto, method = _context.RMC.methodID, call = _context.RMC.callID
+			});
 			var stackTrace = new StackTrace();
 			var method = stackTrace.GetFrame(1).GetMethod();
 

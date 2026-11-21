@@ -11,8 +11,27 @@ namespace QNetZ
 {
 	public static class RMC
 	{
+		// DSF supplies only allowlisted membership/endpoint snapshots. Evaluation
+		// happens inside the diagnostic failure boundary and only when enabled.
+		public static Func<RMCContext, object> DiagnosticSnapshot;
+		private static void TraceRmc(string eventName, RMCContext context, uint? error = null, string errorType = null)
+		{
+			context.Handler.Trace(eventName, context.Client, context.Packet, details: () => new
+			{
+				protocol = (uint)context.RMC.proto, method = context.RMC.methodID, call = context.RMC.callID,
+				error, error_type = errorType, state = DiagnosticSnapshot?.Invoke(context)
+			});
+		}
 		public static void HandlePacket(QPacketHandlerPRUDP handler, QPacket p, QClient client)
 		{
+			var rejection = GetFrameRejectionReason(p.payload);
+			if (rejection != null)
+			{
+				// A final-first fragment tail can look like a reply to the lenient
+				// reader. Do not ACK it or advance session state before it is whole.
+				handler.Trace("rmc.frame.reject", client, p, details: () => new { reason = rejection });
+				return;
+			}
 			client.SessionID = p.m_bySessionID;
 
 			if (p.uiSeqId > client.SeqCounter)
@@ -25,8 +44,21 @@ namespace QNetZ
 				HandleResponse(handler, client, p, rmc);
 		}
 
+		private static string GetFrameRejectionReason(byte[] payload)
+		{
+			if (payload == null || payload.Length < 5)
+				return "short_header";
+			if (BitConverter.ToUInt32(payload, 0) != (uint)(payload.Length - 4))
+				return "length_mismatch";
+			int minimumHeader = (payload[4] & 0x80) != 0 ? 13 : 14;
+			if ((payload[4] & 0x7f) == 0x7f)
+				minimumHeader += 2;
+			return payload.Length < minimumHeader ? "short_header" : null;
+		}
+
 		public static void HandleResponse(QPacketHandlerPRUDP handler, QClient client, QPacket p, RMCPacket rmc)
 		{
+			handler.Trace("rmc.response.received", client, p, details: () => new { protocol = (uint)rmc.proto, method = rmc.methodID, call = rmc.callID, success = rmc.success, error = rmc.error });
 			WriteLog(client, 2, $"Received Response : {rmc}");
 			var message = (rmc.success ? "Success" : $"Fail : {rmc.error.ToString("X8")} for callID = {rmc.callID}");
 			WriteLog(client, 2, $"Got response for {rmc.proto} = {message}");
@@ -45,12 +77,14 @@ namespace QNetZ
 			m.Seek(rmc._afterProtocolOffset, SeekOrigin.Begin);
 
 			var rmcContext = new RMCContext(rmc, handler, client, p);
+			TraceRmc("rmc.request.begin", rmcContext);
 
 			// create service instance
 			var serviceFactory = RMCServiceFactory.GetServiceFactory(rmc.proto);
 
 			if (serviceFactory == null)
 			{
+				TraceRmc("rmc.request.missing_service", rmcContext);
 				WriteLog(client, 1, $"Error: No service registered for packet protocol '{rmc.proto}' (protocolId = {(int)rmc.proto})");
 				handler.SendACK(rmcContext.Packet, client);
 				return;
@@ -64,6 +98,7 @@ namespace QNetZ
 
 			if (bestMethod == null)
 			{
+				TraceRmc("rmc.request.missing_method", rmcContext);
 				WriteLog(client, 1, $"Error: No method '{ rmc.methodID }' registered for protocol '{ rmc.proto }'");
 				handler.SendACK(rmcContext.Packet, client);
 				return;
@@ -79,6 +114,7 @@ namespace QNetZ
 			try
 			{
 				var returnValue = bestMethod.Invoke(serviceInstance, parameters);
+				TraceRmc("rmc.request.returned", rmcContext, (returnValue as RMCResult)?.Error);
 
 				if (returnValue != null)
 				{
@@ -105,6 +141,7 @@ namespace QNetZ
 			}
 			catch (TargetInvocationException tie)
 			{
+				TraceRmc("rmc.request.error", rmcContext, errorType: tie.InnerException?.GetType().Name ?? tie.GetType().Name);
 				handler.SendACK(rmcContext.Packet, client);
 
 				WriteLog(client, 1, $"Error: exception occurred in {rmc.proto}.{bestMethod.Name}");
@@ -121,6 +158,7 @@ namespace QNetZ
 
 		public static void SendResponseWithACK(QPacketHandlerPRUDP handler, QPacket p, RMCPacket rmc, QClient client, RMCPResponse reply, bool useCompression = true, uint error = 0)
 		{
+			handler.Trace("rmc.response.queued", client, p, details: () => new { protocol = (uint)rmc.proto, method = rmc.methodID, call = rmc.callID, error });
 			WriteLog(client, 2, "Response : " + reply.ToString());
 			WriteLog(client, 4, () => "Response data : \n" + reply.PayloadToString());
 
@@ -131,7 +169,7 @@ namespace QNetZ
 
 		public static void SendRMCCall(QPacketHandlerPRUDP handler, QClient client, RMCProtocolId protoId, uint methodId, RMCPRequest requestData)
 		{
-			var packet = new QPacket();
+			var packet = new QPacket { ResponseCacheIdentity = new object() };
 
 			packet.m_oSourceVPort = new QPacket.VPort(0x31);
 			packet.m_oDestinationVPort = new QPacket.VPort(0x3f);
@@ -176,6 +214,7 @@ namespace QNetZ
 			rmc.request = request;
 			rmc.error = error;
 			rmc.callID = ++client.CallCounterRMC;
+			handler.Trace("rmc.call.queued", client, p, details: () => new { protocol = (uint)rmc.proto, method = rmc.methodID, call = rmc.callID });
 
 			var rmcRequestData = rmc.ToBuffer();
 

@@ -41,6 +41,7 @@ namespace BackendDebugServer
 
 			listener = new UdpClient(listenPort);
 			packetHandler = new QPacketHandlerPRUDP(listener, BackendServicesServer.serverPID, listenPort, "RendezVous");
+			packetHandler.Trace("service.start", details: () => new { hosting = "debug_thread" });
 
 			WriteLog(1, $"Listening at port {listenPort}");
 
@@ -61,6 +62,7 @@ namespace BackendDebugServer
 					{
 						if (CurrentRecvTask.IsCanceled || CurrentRecvTask.IsFaulted)
 						{
+							packetHandler.Trace("udp.receive.fault", details: () => new { canceled = CurrentRecvTask?.IsCanceled, error_type = CurrentRecvTask?.Exception?.GetBaseException().GetType().Name });
 							CurrentRecvTask = null;
 						}
                         else if (CurrentRecvTask.IsCompleted)
@@ -78,6 +80,7 @@ namespace BackendDebugServer
 				}
 				catch (Exception ex)
 				{
+					packetHandler.Trace("service.process.error", details: () => new { error_type = ex.GetType().Name });
 					WriteLog(1, "error - exception occured! " + ex.Message);
 					CurrentRecvTask = null;
                 }
@@ -87,6 +90,7 @@ namespace BackendDebugServer
 
 			CurrentRecvTask = null;
 			listener.Close();
+			packetHandler.Trace("service.stop");
 		}
 
 		private static void WriteLog(int priority, string s)

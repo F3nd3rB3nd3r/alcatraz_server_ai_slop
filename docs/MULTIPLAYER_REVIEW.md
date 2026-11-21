@@ -1,0 +1,95 @@
+# Multiplayer backend review
+
+This local review branch is based directly on upstream `ReHamster/AlcatrazServer` master commit `9eeec3a9d77ad17203bbd60cae5503bc698ed9bc`. It is intended for a PR **inside the contributor's repository**, comparing its clean baseline with this branch. Nothing is published by this preparation.
+
+The changes correct independently demonstrated backend defects. They do **not** establish the cause or resolution of the original intermittent host/join-order-dependent internet failure. Packet captures, accounts, deployment history, private configuration, the unrelated database migration and the forced-LAN NAT test mode are excluded.
+
+## Commit-by-commit review
+
+Each commit adds its production change and corresponding tests. Later commits depend on the earlier diagnostic/harness foundation; merging the branch preserves those dependencies. Whole-suite results intentionally expose remaining failures during the series. Focused gates must pass; a nonzero full run is never described as all-green.
+
+### 01. Add opt-in network diagnostics and an offline regression harness
+
+Opt-in JSONL diagnostics record connection/packet/ACK/session metadata, excluding payloads, credentials and arbitrary exception text. Disabled diagnostics do not evaluate snapshots. Queue/file bounds and writer failure containment have automatic checks. The console harness uses production methods and loopback UDP, without web/database startup or real accounts. This first commit characterizes defects; it is not a behavior fix.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --baseline`. Baseline characterization matches all 20 observations; 12 diagnostics checks pass. Full snapshot: 20 scenarios, 7 passes, 13 invariant failures, 0 harness errors.
+
+### 02. Isolate reliable replies and acknowledgements by recipient and stream
+
+Two synthetic server calls could share headers and inherit the first recipient endpoint. Reliable cache lookup now includes the intended recipient. Incoming ACK removal additionally matches that connection's outgoing signature, session, sequence and reversed virtual ports, preventing another connection/stream from clearing the response. Wire headers and retry intervals are preserved.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter ack-,notification-,cache-replay-,lost-ack-retry-control`. All 22 selected scenarios pass; 12 diagnostics checks pass. Full snapshot: 33 scenarios, 25 passes, 8 invariant failures, 0 harness errors.
+
+### 03. Serialize hosted PRUDP callbacks per service
+
+A timer callback can overlap itself, selecting a pending response twice or sharing ownership of the receive task. A per-service Interlocked guard covers update/retry selection and receive-task consumption, releases in finally, and records busy skips. Tests force reentry and competing callbacks without timing-dependent sleeps; independent services remain independent.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter hosted-callback-`. All 4 selected scenarios pass; 15 diagnostics checks pass. Full snapshot: 42 scenarios, 32 passes, 10 invariant failures, 0 harness errors.
+
+### 04. Resolve alternate NAT targets through unique current RVCID bindings
+
+Probe targets can advertise an alternate endpoint while still identifying a current peer by RVCID. Exact endpoint lookup remains first; a unique eligible current binding supplies fallback only when needed. Ambiguous, stale, ineligible and malformed targets are rejected without misrouting. This resolves routing lookup, not internet NAT traversal. No relay or synthetic LAN target injection is included.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter nat-probe-`. All 36 selected scenarios pass; 18 diagnostics checks pass. Full snapshot: 73 scenarios, 65 passes, 8 invariant failures, 0 harness errors.
+
+### 05. Isolate pending fragment ownership and transport cleanup
+
+One handler previously mixed fragmented messages from different clients, acknowledged them to the current callback client and cleared unrelated pending data. Pending buffers are isolated by transport object, signature, session and both virtual ports. Dropping a transport discards only its buffers. Tests interleave 2/5/8 owners and verify serialized RMC replies and ACK recipients.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter fragment-,interleaved-fragment-,ordered-fragment-`. All 23 selected scenarios pass; 21 diagnostics checks pass. Full snapshot: 94 scenarios, 87 passes, 7 invariant failures, 0 harness errors.
+
+### 06. Preserve player registration on repeated CONNECT and retire stale aliases
+
+Repeated CONNECT previously dropped the same PlayerInfo and removed it from the registry while reattaching it to the transport. Repeated association is now idempotent. Rebinding detaches the former current alias; account replacement drops only a genuinely current prior owner. Ticket parsing/authentication behavior is unchanged. Synthetic ticket-stub tests are not authentication validation.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter connect-,duplicate-connect-`. All 23 selected scenarios pass; 24 diagnostics checks pass. Full snapshot: 116 scenarios, 110 passes, 6 invariant failures, 0 harness errors.
+
+### 07. Scope party event and endpoint cleanup to the departing player
+
+An unrelated participation update could delete a newly created empty party before its owner joined, causing later invites to find no lobby. Event cleanup also consulted the wrong membership set and removed unrelated empty records. Cleanup now targets actual former memberships; explicit owner-drop cleanup retires pending creations, including creations before participation. Endpoint cleanup compares address and port, preserving another peer sharing an address. The datastore cleanup hook is registered at creation.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter cleanup-,gathering-create-,unrelated-empty-session,same-ip-different-port-cleanup,different-ip-cleanup-control,disconnect-cleanup-grace-control`. All 53 selected scenarios pass; 24 diagnostics checks pass. Full snapshot: 174 scenarios, 165 passes, 9 invariant failures, 0 harness errors.
+
+### 08. Stop expired retries and give each server call an independent send schedule
+
+A response selected before expiry could be sent after its deadline; the send path now rechecks the existing TTL. Separately, a new server call could inherit an older call's retry schedule. A nonserialized per-call object identity separates its cache while its own fragments share scheduling. Client request replay remains unchanged. Tests force the expiry boundary and pending-call overlap while preserving old retry deadlines.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter expiry-,first-send-,expired-cache-late-send`. All 18 selected scenarios pass; 29 diagnostics checks pass. Full snapshot: 182 scenarios, 179 passes, 3 invariant failures, 0 harness errors.
+
+### 09. Reassemble one complete fragment group across wrap and reject incomplete RMC frames
+
+Numeric sequence sorting failed across 65535-to-0 and completing one message could consume another buffered prefix in the same stream. Selection now uses a preceding part-one anchor and bounded modular distances, retaining other messages. Known missing-middle groups are rejected before fragment ACKs. Incomplete standalone RMC tails are rejected before RMC ACK/state changes, allowing existing selective retries. All 24 permutations of two two-fragment RPCs and all six permutations of a three-fragment RPC are tested. This adds no global receive-order window; fragment-layer ACKs still precede RMC validation of an assembled group.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter fragment-,interleaved-fragment-,ordered-fragment-,contract-,edge-`. All 94 selected scenarios pass; 35 diagnostics checks pass. Full snapshot: 253 scenarios, 250 passes, 3 invariant failures, 0 harness errors.
+
+### 10. Bound incomplete fragment retention and preserve originals on conflicts
+
+Active connections could retain abandoned fragments indefinitely and conflicting same-sequence arrivals could disrupt the first valid request. First-receipt monotonic expiry, logical part/payload duplicate comparison and first-fragment-preserving conflict rejection address these cases. Persistent packet/byte/stream budgets reject new over-budget prefixes without evicting old state; final markers still drain full buffers. These retention and budget values are administrative choices, not measured Ubisoft retry/protocol limits. Diagnostic lists are bounded samples with full counts and truncation flags.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter hardening-`. All 28 selected scenarios pass; 40 diagnostics checks pass. Full snapshot: 281 scenarios, 278 passes, 3 invariant failures, 0 harness errors.
+
+## Reproduction and validation boundaries
+
+Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.
+
+A complete new independent network replay/game trial was not performed for each reconstructed commit. The development investigation also replayed seven existing captures (3,207 complete RMC messages, including 26 multipart messages) and completed ordinary two-client LAN compatibility checks. Those results support the tested development-build paths, not arbitrary internet traffic or every reconstructed intermediate commit.
+
+## Final result and policy choices
+
+The clean review branch has **281 scenarios: 278 passes, three unchanged exploratory failures, zero harness errors**, plus **40 passing diagnostics checks**. The three names are `final-fragment-arrives-first`, `cancel-party-membership` and `url-registration-order`. Their historical global-order/cancellation/URL-aggregation assumptions are not three confirmed remaining defects. The unfiltered command deliberately exits 1. Use the focused gates above for the corrected groups; the handoff also provides an exact-name full-result verification command.
+
+Fragment retention is 120 seconds from first receipt, with a one-second sweep. Per-owner limits are 4,096 pending packets, 32 MiB logical payload and 64 streams; per-handler limits are 32,768 packets, 128 MiB and 1,024 streams. Final markers can transiently exceed persistent limits while removing a selection. These bounds cover pending storage/index counts, not total process memory or upstream parse/decompression allocations. Captured sample maxima were eight pending packets, 7,704 bytes and about 17.231 ms from first prefix to final; they are not measured worst-case internet limits.
+
+Whole-message ordering, legitimate sequence reuse before expiry, authentication/endpoint validation and original internet failure attribution remain separate questions. Cancellation, host-URL replacement, public-lobby merging, NAT traversal and relay policies are unchanged. The forced-LAN resolver mode and its separate 20-check suite are intentionally absent from this review branch.
+
+## One-command review gate
+
+On Windows with PowerShell and .NET 8 or later tooling:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/MultiplayerSimulation/Verify-Reviewed.ps1
+```
+
+This builds/runs the complete harness, requires exactly 281 observations with the three named exploratory failures and zero harness errors, then requires all 40 diagnostic checks. It returns success only for that exact documented result; the underlying full correctness command still returns 1. Results stay in ignored `artifacts/review-verification-<id>/`. `-NoRestore` is available after a successful restore in an offline cached environment. Update the expected counts/names deliberately if the suite changes; this wrapper must not silently accept new failures.
+
+Both AlcatrazGameServices and BackendDebugServer build on the prepared review branch. Existing warnings remain, including the debug frontend's legacy HexBox target warning. No package dependency was added. The running private test backend was not redeployed during this review preparation.

@@ -6,12 +6,14 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace Alcatraz.GameServices.Services
 {
 	public abstract class QPRUDPServiceBase : IHostedService
 	{
 		private Timer _timer;
+		private int _processing;
 		protected ILogger _logger;
 		public abstract string ServiceName { get; }
 		public abstract ushort ListenPort { get; }
@@ -38,6 +40,7 @@ namespace Alcatraz.GameServices.Services
 			listener = new UdpClient(ListenPort);
 			packetHandler = new QPacketHandlerPRUDP(listener, ServerPID, ListenPort, ServiceName);
 			packetHandler.Updates.Add(() => Update());
+			packetHandler.Trace("service.start", details: () => new { hosting = "hosted_timer", timer_period_ms = 1 });
 
 			_timer = new Timer(Process, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(1));
 			return Task.CompletedTask;
@@ -48,6 +51,7 @@ namespace Alcatraz.GameServices.Services
 			_timer.Change(Timeout.Infinite, Timeout.Infinite);
 			CurrentRecvTask = null;
 			listener.Close();
+			packetHandler.Trace("service.stop");
 
 			_logger.LogInformation($"{ServiceName} is STOPPED.");
 
@@ -58,6 +62,17 @@ namespace Alcatraz.GameServices.Services
 
 		protected void Process(object state)
 		{
+			// A timer may fire again before its previous callback finishes. Keep
+			// update/retry selection and receive-task ownership in one callback;
+			// the next tick can process queued work without blocking this tick.
+			if (Interlocked.CompareExchange(ref _processing, 1, 0) != 0)
+			{
+				packetHandler.Trace("service.callback.skipped", details: () => new { reason = "busy" });
+				return;
+			}
+
+			var diagnostic = NetworkDiagnostics.Enabled;
+			var started = diagnostic ? Stopwatch.GetTimestamp() : 0;
 			try
 			{
 				packetHandler.Update();
@@ -67,6 +82,11 @@ namespace Alcatraz.GameServices.Services
 				{
 					if (CurrentRecvTask.IsCanceled || CurrentRecvTask.IsFaulted)
 					{
+						packetHandler.Trace("udp.receive.fault", details: () => new
+						{
+							canceled = CurrentRecvTask?.IsCanceled,
+							error_type = CurrentRecvTask?.Exception?.GetBaseException().GetType().Name
+						});
 						CurrentRecvTask = null;
 					}
                     else if (CurrentRecvTask.IsCompleted)
@@ -82,9 +102,20 @@ namespace Alcatraz.GameServices.Services
 			}
 			catch (Exception ex)
 			{
+				packetHandler.Trace("service.process.error", details: () => new { error_type = ex.GetType().Name });
 				_logger.LogError(ex.Message + ex.StackTrace);
                 CurrentRecvTask = null;
             }
+			finally
+			{
+				Volatile.Write(ref _processing, 0);
+				if (diagnostic)
+				{
+					var elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+					if (elapsed >= 100)
+						packetHandler.Trace("service.callback.complete", details: () => new { elapsed_ms = elapsed, active_at_entry = 1 });
+				}
+			}
 		}
 	}
 }

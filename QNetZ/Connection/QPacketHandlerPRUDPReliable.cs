@@ -51,38 +51,80 @@ namespace QNetZ
 			if (!packet.flags.Contains(QPacket.PACKETFLAG.FLAG_RELIABLE))
 				return true;
 
-			if (!AccumulatedPackets.Any(x =>
-				 x.uiSeqId == packet.uiSeqId &&
-				 x.checkSum == packet.checkSum &&
-				 x.m_byPartNumber == packet.m_byPartNumber &&
-				 x.checkSum == packet.checkSum &&
-				 x.m_bySessionID == packet.m_bySessionID &&
-				 x.m_uiSignature == packet.m_uiSignature
-				))
+			var receivedAt = Environment.TickCount64;
+			ExpireFragmentBuffers(receivedAt);
+
+			// A handler serves several peers and virtual streams. Keep pending
+			// packets with the transport object and the complete incoming stream.
+			var key = (client, packet.m_uiSignature, packet.m_bySessionID,
+				packet.m_oSourceVPort?.toByte(), packet.m_oDestinationVPort?.toByte());
+			if (!FragmentBuffers.TryGetValue(key, out var accumulated))
+				accumulated = new FragmentBuffer();
+			Trace("fragment.receive", client, packet, details: () => new
 			{
-				AccumulatedPackets.Add(packet);
+				buffer_scope = "connection_session_stream", pending_streams = FragmentBuffers.Count,
+				buffer_count = accumulated.Count, buffer_truncated = accumulated.Count > FragmentDiagnosticSample,
+				buffer = accumulated.Take(FragmentDiagnosticSample).Select(x => new {
+					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
+					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
+				}).ToArray()
+			});
+
+			if (accumulated.BySequence.TryGetValue(packet.uiSeqId, out var existing))
+			{
+				if (existing.m_byPartNumber != packet.m_byPartNumber || !existing.payload.SequenceEqual(packet.payload))
+					Trace("fragment.reject", client, packet, details: () => new { reason = "conflicting_sequence" });
+				else
+					Trace("fragment.duplicate", client, packet);
+				// Neither a duplicate nor a conflicting arrival changes the first
+				// fragment, its age, or ACK status before the message is complete.
+				return false;
 			}
 
 			if (packet.m_byPartNumber != 0)
 			{
+				var rejection = FragmentCapacityRejection(client, packet.payload.Length, !FragmentBuffers.ContainsKey(key));
+				if (rejection != null)
+				{
+					Trace("fragment.reject", client, packet, details: () => new
+					{
+						reason = rejection, pending_packets = FragmentPacketCount,
+						pending_bytes = FragmentPayloadBytes, pending_streams = FragmentBuffers.Count
+					});
+					return false;
+				}
+			}
+			// A final marker is transient and must be allowed to drain a full
+			// persistent buffer. It is removed with its selection below.
+			FragmentBuffers.TryAdd(key, accumulated);
+			AddFragment(accumulated, packet, receivedAt);
+
+			if (packet.m_byPartNumber != 0)
+			{
+				Trace("fragment.wait", client, packet);
 				// add and don't process
 				return false;
 			}
 
-			// got last fragment, assemble
-			var orderedFragments = AccumulatedPackets.OrderBy(x => x.uiSeqId);
-			int numPackets = 0;
-			foreach (var fragPacket in orderedFragments)
+			// Select one message relative to its prefix, including 65535 -> 0.
+			// Reordered prefixes of other messages must survive this completion.
+			var fragments = SelectFragmentGroup(accumulated, packet);
+			int numPackets = fragments.Length;
+			Trace("fragment.selection", client, packet, details: () => new
 			{
-				numPackets++;
-				if (fragPacket.m_byPartNumber == 0)
-					break;
-			}
+				selected_count = fragments.Length, selected_truncated = fragments.Length > FragmentDiagnosticSample,
+				selected = fragments.Take(FragmentDiagnosticSample).Select(x => new {
+					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
+					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
+				}).ToArray(),
+				cleared_count = fragments.Length, retained_packets = accumulated.Count - fragments.Length,
+				retained_streams = FragmentBuffers.Count - (accumulated.Count == fragments.Length ? 1 : 0)
+			});
 
-			var fragments = orderedFragments.Take(numPackets).ToArray();
-
-			// remove fragments that we processed
-			AccumulatedPackets.Clear();//RemoveAll(x => fragments.Contains(x));
+			// Discard this selection even on rejection, preserving other messages.
+			RemoveFragments(accumulated, fragments);
+			if (accumulated.Count == 0)
+				FragmentBuffers.Remove(key);
 
 			if (numPackets > 1)
 			{
@@ -91,14 +133,20 @@ namespace QNetZ
 				int nfrag = 1;
 				foreach (var fragPacket in fragments)
 				{
-					//if(fragPacket.uiSeqId != seqId)
-					//{
-					//	QLog.WriteLine(1, "ERROR : packet sequence mismatch!");
-					//	//return false;
-					//}
+					// A known multipart group must not acknowledge or concatenate
+					// surviving fragments across a missing sequence.
+					if (fragPacket.uiSeqId != seqId)
+					{
+						Trace("fragment.reject", client, packet, details: () => new
+						{
+							reason = "sequence_gap", expected_sequence = seqId, received_sequence = fragPacket.uiSeqId
+						});
+						return false;
+					}
 
 					if (fragments.Length == nfrag && fragPacket.m_byPartNumber != 0)
 					{
+						Trace("fragment.reject", client, packet, details: () => new { reason = "missing_final_part" });
 						QLog.WriteLine(1, "ERROR : packet sequence does not end with 0 - call a programmer!");
 						return false;
 					}
@@ -107,6 +155,7 @@ namespace QNetZ
 					{
 						if (fragPacket.m_byPartNumber != nfrag)
 						{
+							Trace("fragment.reject", client, packet, details: () => new { reason = "insufficient_parts", expected_part = nfrag });
 							QLog.WriteLine(1, "ERROR : insufficient packet fragments - call a programmer!");
 							return false;
 						}
@@ -134,19 +183,75 @@ namespace QNetZ
 				QLog.WriteLine(10, $"Defragmented sequence of {numPackets} packets !\n");
 			}
 
+			Trace("fragment.complete", client, packet, details: () => new { fragments = numPackets });
 			return true;
 		}
 
+		private static QPacket[] SelectFragmentGroup(List<QPacket> buffered, QPacket final)
+		{
+			// Part IDs 1..255 precede part 0. The closest preceding part-one
+			// anchor identifies the current message without a global order gate.
+			var prefix = buffered.Where(x => x.m_byPartNumber == 1)
+				.Select(x => new { Packet = x, Distance = unchecked((ushort)(final.uiSeqId - x.uiSeqId)) })
+				.Where(x => x.Distance > 0 && x.Distance <= byte.MaxValue)
+				.OrderBy(x => x.Distance).Select(x => x.Packet).FirstOrDefault();
+			if (prefix != null)
+			{
+				var distance = unchecked((ushort)(final.uiSeqId - prefix.uiSeqId));
+				return buffered.Where(x => unchecked((ushort)(x.uiSeqId - prefix.uiSeqId)) <= distance)
+					.OrderBy(x => unchecked((ushort)(x.uiSeqId - prefix.uiSeqId))).ToArray();
+			}
+
+			// Preserve validation of orphan non-final parts, without consuming
+			// future prefixes. With no preceding parts this is a standalone packet.
+			var orphans = buffered.Where(x => x.m_byPartNumber != 0
+				&& unchecked((ushort)(final.uiSeqId - x.uiSeqId)) <= byte.MaxValue).ToArray();
+			return orphans.Append(final)
+				.OrderByDescending(x => unchecked((ushort)(final.uiSeqId - x.uiSeqId))).ToArray();
+		}
+
+		private void DropFragmentBuffers(QClient client, string reason)
+		{
+			foreach (var key in FragmentBuffers.Keys.Where(key => ReferenceEquals(key.Owner, client)).ToArray())
+			{
+				Trace("fragment.drop", client, details: () => new
+				{
+					reason, signature = key.Signature, session = key.Session,
+					source_vport = key.Source, destination_vport = key.Destination,
+					pending = FragmentBuffers[key].Count
+				});
+				RemoveFragments(FragmentBuffers[key], FragmentBuffers[key].ToArray());
+				FragmentBuffers.Remove(key);
+			}
+		}
+
 		// acknowledges packet
-		void OnGotAck(QPacket ackPacket)
+		private static bool MatchesAck(QReliableResponse cache, QPacket response, QClient client, QPacket ack)
+		{
+			// Incoming signatures identify the server-side connection; outgoing
+			// signatures identify its peer. They must not be compared directly.
+			return cache.Endpoint.Equals(client.Endpoint) &&
+				response.m_uiSignature == client.IDsend &&
+				response.m_bySessionID == ack.m_bySessionID &&
+				response.uiSeqId == ack.uiSeqId &&
+				response.m_oSourceVPort?.Equals(ack.m_oDestinationVPort) == true &&
+				response.m_oDestinationVPort?.Equals(ack.m_oSourceVPort) == true;
+		}
+
+		void OnGotAck(QClient client, QPacket ackPacket)
 		{
 			lock (CachedResponses)
 			{
+				Trace("ack.matches", client, ackPacket, details: () => new
+				{
+					matches = CachedResponses.SelectMany(cr => cr.ResponseList
+						.Where(x => MatchesAck(cr, x.Packet, client, ackPacket))
+						.Select(x => new { destination = cr.Endpoint.ToString(), response_signature = x.Packet.m_uiSignature, sequence = x.Packet.uiSeqId })).ToArray()
+				});
 				foreach (var cr in CachedResponses)
 				{
 					cr.ResponseList.RemoveAll(x =>
-						x.Packet.m_bySessionID == ackPacket.m_bySessionID &&
-						x.Packet.uiSeqId == ackPacket.uiSeqId);
+						MatchesAck(cr, x.Packet, client, ackPacket));
 				}
 
 				CachedResponses.RemoveAll(x => !x.ResponseList.Any());
@@ -154,7 +259,7 @@ namespace QNetZ
 		}
 
 		// returns response cache list by request packet
-		QReliableResponse GetCachedResponseByRequestPacket(QPacket packet)
+		QReliableResponse GetCachedResponseByRequestPacket(QPacket packet, IPEndPoint endpoint)
 		{
 			if (packet == null)
 				return null;
@@ -180,6 +285,8 @@ namespace QNetZ
 					x.SrcPacket.m_oDestinationVPort == null);
 
 				return CachedResponses.FirstOrDefault(cr =>
+						cr.Endpoint.Equals(endpoint) &&
+						ReferenceEquals(cr.SrcPacket.ResponseCacheIdentity, packet.ResponseCacheIdentity) &&
 						cr.SrcPacket.type == packet.type &&
 						cr.SrcPacket.m_uiSignature == packet.m_uiSignature &&
 						cr.SrcPacket.m_oSourceVPort.type == packet.m_oSourceVPort.type &&
@@ -205,7 +312,9 @@ namespace QNetZ
 			if (responsePacket.flags.Contains(QPacket.PACKETFLAG.FLAG_ACK))
 				return false;
 
-			var cache = GetCachedResponseByRequestPacket(requestPacket);
+			// Server-initiated RMC calls use synthetic request headers shared by
+			// several clients. Never reuse another recipient's destination/cache.
+			var cache = GetCachedResponseByRequestPacket(requestPacket, ep);
 			if (cache == null)
 			{
 				lock (CachedResponses)
@@ -222,6 +331,13 @@ namespace QNetZ
 			lock (cache.ResponseList)
 			{
 				cache.ResponseList.Add(new QPacketState(responsePacket));
+				Trace("cache.enqueue", packet: responsePacket, endpoint: ep, details: () => new
+				{
+					cache_origin = requestPacket.ResponseCacheIdentity == null ? "client_request" : "server_call",
+					cached_destination = cache.Endpoint.ToString(), destination_matches = cache.Endpoint.Equals(ep),
+					request_signature = requestPacket?.m_uiSignature, request_session = requestPacket?.m_bySessionID,
+					request_sequence = requestPacket?.uiSeqId, expires_utc = cache.DropTime, pending = cache.ResponseList.Count
+				});
 			}
 			return true;
 		}
@@ -235,7 +351,23 @@ namespace QNetZ
                 foreach (var crp in cache.ResponseList)
 				{
 					var data = crp.Packet.toBuffer();
-					UDP.Send(data, data.Length, cache.Endpoint);
+					// A selected cache can expire before send, including through the
+					// direct replay path. Never transmit it past its existing TTL.
+					if (cache.SrcPacket == null || DateTime.UtcNow >= cache.DropTime)
+					{
+						Trace("cache.retry.skipped", packet: crp.Packet, endpoint: cache.Endpoint, details: () => new
+						{
+							reason = cache.SrcPacket == null ? "missing_request" : "expired",
+							expires_utc = cache.DropTime
+						});
+						return;
+					}
+					Trace("cache.transmit", packet: crp.Packet, endpoint: cache.Endpoint, details: () => new
+					{
+						prior_send_count = crp.ReSendCount, expires_utc = cache.DropTime, due_utc = cache.ResendTime,
+						expired = DateTime.UtcNow >= cache.DropTime
+					});
+					SendDatagram(data, cache.Endpoint, crp.Packet, "reliable");
 
 					crp.ReSendCount++;
 					minResendTimes = Math.Min(minResendTimes, crp.ReSendCount);
@@ -249,8 +381,12 @@ namespace QNetZ
 			QReliableResponse[] reliableResend;
 			lock (CachedResponses)
 			{
-				reliableResend = CachedResponses.Where(x => x.SrcPacket != null && DateTime.UtcNow >= x.ResendTime).ToArray();
-				int droppedPackets = CachedResponses.RemoveAll(x => x.SrcPacket == null || DateTime.UtcNow >= x.DropTime);
+				var now = DateTime.UtcNow;
+				if (NetworkDiagnostics.Enabled)
+					foreach (var expiring in CachedResponses.Where(x => x.SrcPacket == null || now >= x.DropTime))
+						Trace("cache.expire", endpoint: expiring.Endpoint, details: () => new { pending = expiring.ResponseList.Count, expires_utc = expiring.DropTime });
+				int droppedPackets = CachedResponses.RemoveAll(x => x.SrcPacket == null || now >= x.DropTime);
+				reliableResend = CachedResponses.Where(x => now >= x.ResendTime).ToArray();
 
 				if(droppedPackets > 0)
 					QLog.WriteLine(5, $"Dropped {droppedPackets} reliable packets");
