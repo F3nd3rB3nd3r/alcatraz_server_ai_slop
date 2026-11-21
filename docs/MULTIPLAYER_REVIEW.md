@@ -62,8 +62,34 @@ Numeric sequence sorting failed across 65535-to-0 and completing one message cou
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter fragment-,interleaved-fragment-,ordered-fragment-,contract-,edge-`. All 94 selected scenarios pass; 35 diagnostics checks pass. Full snapshot: 253 scenarios, 250 passes, 3 invariant failures, 0 harness errors.
 
+### 10. Bound incomplete fragment retention and preserve originals on conflicts
+
+Active connections could retain abandoned fragments indefinitely and conflicting same-sequence arrivals could disrupt the first valid request. First-receipt monotonic expiry, logical part/payload duplicate comparison and first-fragment-preserving conflict rejection address these cases. Persistent packet/byte/stream budgets reject new over-budget prefixes without evicting old state; final markers still drain full buffers. These retention and budget values are administrative choices, not measured Ubisoft retry/protocol limits. Diagnostic lists are bounded samples with full counts and truncation flags.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter hardening-`. All 28 selected scenarios pass; 40 diagnostics checks pass. Full snapshot: 281 scenarios, 278 passes, 3 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.
 
 A complete new independent network replay/game trial was not performed for each reconstructed commit. The development investigation also replayed seven existing captures (3,207 complete RMC messages, including 26 multipart messages) and completed ordinary two-client LAN compatibility checks. Those results support the tested development-build paths, not arbitrary internet traffic or every reconstructed intermediate commit.
+
+## Final result and policy choices
+
+The clean review branch has **281 scenarios: 278 passes, three unchanged exploratory failures, zero harness errors**, plus **40 passing diagnostics checks**. The three names are `final-fragment-arrives-first`, `cancel-party-membership` and `url-registration-order`. Their historical global-order/cancellation/URL-aggregation assumptions are not three confirmed remaining defects. The unfiltered command deliberately exits 1. Use the focused gates above for the corrected groups; the handoff also provides an exact-name full-result verification command.
+
+Fragment retention is 120 seconds from first receipt, with a one-second sweep. Per-owner limits are 4,096 pending packets, 32 MiB logical payload and 64 streams; per-handler limits are 32,768 packets, 128 MiB and 1,024 streams. Final markers can transiently exceed persistent limits while removing a selection. These bounds cover pending storage/index counts, not total process memory or upstream parse/decompression allocations. Captured sample maxima were eight pending packets, 7,704 bytes and about 17.231 ms from first prefix to final; they are not measured worst-case internet limits.
+
+Whole-message ordering, legitimate sequence reuse before expiry, authentication/endpoint validation and original internet failure attribution remain separate questions. Cancellation, host-URL replacement, public-lobby merging, NAT traversal and relay policies are unchanged. The forced-LAN resolver mode and its separate 20-check suite are intentionally absent from this review branch.
+
+## One-command review gate
+
+On Windows with PowerShell and .NET 8 or later tooling:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/MultiplayerSimulation/Verify-Reviewed.ps1
+```
+
+This builds/runs the complete harness, requires exactly 281 observations with the three named exploratory failures and zero harness errors, then requires all 40 diagnostic checks. It returns success only for that exact documented result; the underlying full correctness command still returns 1. Results stay in ignored `artifacts/review-verification-<id>/`. `-NoRestore` is available after a successful restore in an offline cached environment. Update the expected counts/names deliberately if the suite changes; this wrapper must not silently accept new failures.
+
+Both AlcatrazGameServices and BackendDebugServer build on the prepared review branch. Existing warnings remain, including the debug frontend's legacy HexBox target warning. No package dependency was added. The running private test backend was not redeployed during this review preparation.

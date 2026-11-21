@@ -28,7 +28,7 @@ namespace QNetZ
 		public string SourceName;
 		public readonly uint PID;
 		public readonly ushort Port;
-		private readonly Dictionary<(QClient Owner, uint Signature, byte Session, byte? Source, byte? Destination), List<QPacket>>
+		private readonly Dictionary<(QClient Owner, uint Signature, byte Session, byte? Source, byte? Destination), FragmentBuffer>
 			FragmentBuffers = new();
 		private List<QReliableResponse> CachedResponses = new List<QReliableResponse>();
 		private readonly List<ulong> NATPingTimeToIgnore = new List<ulong>();
@@ -267,6 +267,7 @@ namespace QNetZ
 		{
 			CheckResendPackets();
 			DropClients();
+			ExpireFragmentBuffers(Environment.TickCount64);
 
 			foreach (var upd in Updates)
 				upd();

@@ -51,35 +51,53 @@ namespace QNetZ
 			if (!packet.flags.Contains(QPacket.PACKETFLAG.FLAG_RELIABLE))
 				return true;
 
+			var receivedAt = Environment.TickCount64;
+			ExpireFragmentBuffers(receivedAt);
+
 			// A handler serves several peers and virtual streams. Keep pending
 			// packets with the transport object and the complete incoming stream.
 			var key = (client, packet.m_uiSignature, packet.m_bySessionID,
 				packet.m_oSourceVPort?.toByte(), packet.m_oDestinationVPort?.toByte());
 			if (!FragmentBuffers.TryGetValue(key, out var accumulated))
-			{
-				accumulated = new List<QPacket>();
-				FragmentBuffers.Add(key, accumulated);
-			}
+				accumulated = new FragmentBuffer();
 			Trace("fragment.receive", client, packet, details: () => new
 			{
 				buffer_scope = "connection_session_stream", pending_streams = FragmentBuffers.Count,
-				buffer = accumulated.Select(x => new {
+				buffer_count = accumulated.Count, buffer_truncated = accumulated.Count > FragmentDiagnosticSample,
+				buffer = accumulated.Take(FragmentDiagnosticSample).Select(x => new {
 					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
 					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
 				}).ToArray()
 			});
 
-			if (!accumulated.Any(x =>
-				 x.uiSeqId == packet.uiSeqId &&
-				 x.checkSum == packet.checkSum &&
-				 x.m_byPartNumber == packet.m_byPartNumber &&
-				 x.checkSum == packet.checkSum &&
-				 x.m_bySessionID == packet.m_bySessionID &&
-				 x.m_uiSignature == packet.m_uiSignature
-				))
+			if (accumulated.BySequence.TryGetValue(packet.uiSeqId, out var existing))
 			{
-				accumulated.Add(packet);
+				if (existing.m_byPartNumber != packet.m_byPartNumber || !existing.payload.SequenceEqual(packet.payload))
+					Trace("fragment.reject", client, packet, details: () => new { reason = "conflicting_sequence" });
+				else
+					Trace("fragment.duplicate", client, packet);
+				// Neither a duplicate nor a conflicting arrival changes the first
+				// fragment, its age, or ACK status before the message is complete.
+				return false;
 			}
+
+			if (packet.m_byPartNumber != 0)
+			{
+				var rejection = FragmentCapacityRejection(client, packet.payload.Length, !FragmentBuffers.ContainsKey(key));
+				if (rejection != null)
+				{
+					Trace("fragment.reject", client, packet, details: () => new
+					{
+						reason = rejection, pending_packets = FragmentPacketCount,
+						pending_bytes = FragmentPayloadBytes, pending_streams = FragmentBuffers.Count
+					});
+					return false;
+				}
+			}
+			// A final marker is transient and must be allowed to drain a full
+			// persistent buffer. It is removed with its selection below.
+			FragmentBuffers.TryAdd(key, accumulated);
+			AddFragment(accumulated, packet, receivedAt);
 
 			if (packet.m_byPartNumber != 0)
 			{
@@ -94,7 +112,8 @@ namespace QNetZ
 			int numPackets = fragments.Length;
 			Trace("fragment.selection", client, packet, details: () => new
 			{
-				selected = fragments.Select(x => new {
+				selected_count = fragments.Length, selected_truncated = fragments.Length > FragmentDiagnosticSample,
+				selected = fragments.Take(FragmentDiagnosticSample).Select(x => new {
 					signature = x.m_uiSignature, session = x.m_bySessionID, sequence = x.uiSeqId, part = x.m_byPartNumber,
 					source_vport = x.m_oSourceVPort?.toByte(), destination_vport = x.m_oDestinationVPort?.toByte()
 				}).ToArray(),
@@ -103,8 +122,7 @@ namespace QNetZ
 			});
 
 			// Discard this selection even on rejection, preserving other messages.
-			var selected = new HashSet<QPacket>(fragments);
-			accumulated.RemoveAll(selected.Contains);
+			RemoveFragments(accumulated, fragments);
 			if (accumulated.Count == 0)
 				FragmentBuffers.Remove(key);
 
@@ -202,6 +220,7 @@ namespace QNetZ
 					source_vport = key.Source, destination_vport = key.Destination,
 					pending = FragmentBuffers[key].Count
 				});
+				RemoveFragments(FragmentBuffers[key], FragmentBuffers[key].ToArray());
 				FragmentBuffers.Remove(key);
 			}
 		}

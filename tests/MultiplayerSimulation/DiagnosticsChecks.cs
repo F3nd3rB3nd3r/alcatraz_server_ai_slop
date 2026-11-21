@@ -110,6 +110,8 @@ static class DiagnosticsChecks
             "independent first sends, fragmentation and unchanged old retry schedules pass with diagnostics enabled");
         Assert(TransportEdgeChecks.Cases.Select(item => TransportEdgeChecks.Run(item.Kind)).All(x => x.Item1),
             "wrap, overlapping messages, all arrival permutations and selective retry pass with diagnostics enabled");
+        Assert(FragmentHardeningChecks.DiagnosticCases.Select(kind => FragmentHardeningChecks.Run(kind, secret)).All(x => x.Item1),
+            "fragment expiry, conflicts, budget rejection and maximum-part controls pass with diagnostics enabled");
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -187,6 +189,33 @@ static class DiagnosticsChecks
         Assert(records.Any(x => x.RootElement.GetProperty("event").GetString() == "fragment.selection"
             && x.RootElement.GetProperty("data").GetProperty("details").GetProperty("retained_packets").GetInt32() > 0),
             "fragment completion records retained messages in the same stream");
+        var expired = records.Where(x => x.RootElement.GetProperty("event").GetString() == "fragment.expire")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(expired.Length > 0 && expired.All(x => x.GetProperty("reason").GetString() == "first_receipt_timeout"
+            && x.GetProperty("expired_packets").GetInt32() > 0 && x.GetProperty("lifetime_ms").GetInt64() == 120000
+            && x.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(new[] {
+                "reason", "signature", "session", "source_vport", "destination_vport", "expired_packets", "expired_bytes", "retained_packets", "lifetime_ms" }.Order())),
+            "fragment expiry logs only allowlisted counts, stream headers and retention policy");
+        var fragmentRejections = records.Where(x => x.RootElement.GetProperty("event").GetString() == "fragment.reject")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(fragmentRejections.Any(x => x.GetProperty("reason").GetString() == "conflicting_sequence")
+            && fragmentRejections.Where(x => x.GetProperty("reason").GetString() == "conflicting_sequence")
+                .All(x => x.EnumerateObject().Select(p => p.Name).SequenceEqual(new[] { "reason" }))
+            && Has("fragment.duplicate"), "conflict and duplicate outcomes exclude compared payloads and checksums");
+        Assert(fragmentRejections.Any(x => x.GetProperty("reason").GetString() == "owner_stream_limit")
+            && fragmentRejections.Where(x => x.GetProperty("reason").GetString() == "owner_stream_limit")
+                .All(x => x.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(new[] {
+                    "reason", "pending_packets", "pending_bytes", "pending_streams" }.Order())),
+            "capacity rejection records only reason and bounded-state usage");
+        var receivedBuffers = records.Where(x => x.RootElement.GetProperty("event").GetString() == "fragment.receive")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        var selectedBuffers = records.Where(x => x.RootElement.GetProperty("event").GetString() == "fragment.selection")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(receivedBuffers.All(x => x.GetProperty("buffer").GetArrayLength() <= 32)
+            && selectedBuffers.All(x => x.GetProperty("selected").GetArrayLength() <= 32)
+            && receivedBuffers.Any(x => x.GetProperty("buffer_truncated").GetBoolean() && x.GetProperty("buffer_count").GetInt32() > 32)
+            && selectedBuffers.Any(x => x.GetProperty("selected_truncated").GetBoolean() && x.GetProperty("selected_count").GetInt32() == 256),
+            "fragment header samples stay bounded while complete counts and truncation remain explicit");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");
