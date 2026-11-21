@@ -26,6 +26,12 @@ A timer callback can overlap itself, selecting a pending response twice or shari
 
 Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter hosted-callback-`. All 4 selected scenarios pass; 15 diagnostics checks pass. Full snapshot: 42 scenarios, 32 passes, 10 invariant failures, 0 harness errors.
 
+### 04. Resolve alternate NAT targets through unique current RVCID bindings
+
+Probe targets can advertise an alternate endpoint while still identifying a current peer by RVCID. Exact endpoint lookup remains first; a unique eligible current binding supplies fallback only when needed. Ambiguous, stale, ineligible and malformed targets are rejected without misrouting. This resolves routing lookup, not internet NAT traversal. No relay or synthetic LAN target injection is included.
+
+Gate: `dotnet run --project tests/MultiplayerSimulation -- --filter nat-probe-`. All 36 selected scenarios pass; 18 diagnostics checks pass. Full snapshot: 73 scenarios, 65 passes, 8 invariant failures, 0 harness errors.
+
 ## Reproduction and validation boundaries
 
 Tests are bounded synthetic fixtures calling production code, including real loopback ACK/reply handling. They use no live account, authentication server, database, game executable or public backend. Some private timestamps/methods are forced through reflection to reproduce exact interleavings without waiting. All test-file formatting was independently checked for Roslyn syntax equivalence.

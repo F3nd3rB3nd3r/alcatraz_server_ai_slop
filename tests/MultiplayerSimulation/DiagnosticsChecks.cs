@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using DSFServices;
 using QNetZ;
+using QNetZ.DDL;
 
 static class DiagnosticsChecks
 {
@@ -58,6 +59,12 @@ static class DiagnosticsChecks
         h.Update();
         Assert(HostedCallbackChecks.ReceiveOwnership().Item1, "hosted callback retains receive ownership with diagnostics enabled");
         Assert(HostedCallbackChecks.ReliableReentry().Item1, "hosted callback prevents duplicate selection with diagnostics enabled");
+        var natChecks = new[] { "same-ip-peers", "ambiguous-rvcid-control", "fallback-with-exact-duplicates-control",
+            "repeated-alternates", "endpoint-rvcid-conflict-control", "malformed-then-observed", "unidentified-caller-control" }
+            .Select(NatProbeChecks.Run).ToArray();
+        Assert(natChecks.All(x => x.Item1), "NAT fallback, rejection and exact-route controls pass with diagnostics enabled");
+        var malformedNat = new RDVServices.Services.NATTraversalService { Context = new(new RMCPacket(), h, client, packet) };
+        malformedNat.RequestProbeInitiation([new StationURL("prudp", secret, new Dictionary<string, int> { ["port"] = 3074 })]);
         await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
         {
             for (var i = 0; i < 32; i++)
@@ -69,13 +76,22 @@ static class DiagnosticsChecks
         var lines = Directory.GetFiles(directory, "*.jsonl").SelectMany(File.ReadAllLines).ToArray();
         var records = lines.Select(x => JsonDocument.Parse(x)).ToArray();
         bool Has(string name) => records.Any(x => x.RootElement.GetProperty("event").GetString() == name);
-        Assert(lines.All(x => !x.Contains(secret)), "packet payload and exception message excluded");
+        Assert(lines.All(x => !x.Contains(secret)), "packet payload, exception message and malformed target text excluded");
         Assert(Has("udp.receive") && Has("packet.receive") && Has("udp.send.complete"), "wire receive and actual send metadata recorded");
         Assert(Has("rmc.request.begin") && Has("rmc.request.returned") && Has("nat.result"), "RMC execution and NAT result correlated");
         Assert(Has("rmc.unimplemented"), "unimplemented service path explicit");
         var skipped = records.Where(x => x.RootElement.GetProperty("event").GetString() == "service.callback.skipped").ToArray();
         Assert(skipped.Length == 9 && skipped.All(x => x.RootElement.GetProperty("data").GetProperty("details").GetProperty("reason").GetString() == "busy")
             && !Has("service.callback.overlap"), "nine prevented callback entries recorded as busy skips, with no executing overlap");
+        var lookups = records.Where(x => x.RootElement.GetProperty("event").GetString() == "nat.probe.lookup")
+            .Select(x => x.RootElement.GetProperty("data").GetProperty("details")).ToArray();
+        Assert(lookups.Any(x => x.GetProperty("resolution").GetString() == "rvcid" && x.GetProperty("probe_queued").GetBoolean())
+            && lookups.Any(x => x.GetProperty("reason").GetString() == "ambiguous_rvcid" && x.GetProperty("eligible_candidates").GetInt32() == 2 && !x.GetProperty("probe_queued").GetBoolean())
+            && lookups.Any(x => x.GetProperty("resolution").GetString() == "endpoint" && x.GetProperty("endpoint_rvcid_conflict").ValueKind == JsonValueKind.True),
+            "NAT fallback selection, ambiguity and endpoint/ID disagreement recorded");
+        Assert(new[] { "endpoint_available", "duplicate_target" }.All(reason => lookups.Any(x => x.GetProperty("suppression").GetString() == reason && !x.GetProperty("probe_queued").GetBoolean()))
+            && new[] { "invalid_endpoint", "caller_not_current" }.All(reason => lookups.Any(x => x.GetProperty("reason").GetString() == reason && !x.GetProperty("probe_queued").GetBoolean())),
+            "NAT duplicate suppression, invalid target and stale caller reasons recorded");
         Assert(Has("after.snapshot.error"), "snapshot exception contained");
         var last = records.Single(x => x.RootElement.GetProperty("event").GetString() == "diagnostics.stopped").RootElement;
         Assert(last.GetProperty("dropped").GetInt64() >= 1 && last.GetProperty("failures").GetInt64() >= 1, "oversize drop and snapshot failure counted");

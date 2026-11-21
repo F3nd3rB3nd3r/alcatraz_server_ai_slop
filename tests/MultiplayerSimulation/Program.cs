@@ -62,6 +62,8 @@ Check("nat-probe-alternate-address", true, () => NatProbeLookup("address"));
 Check("nat-probe-alternate-port", true, () => NatProbeLookup("port"));
 Check("nat-probe-alternate-then-observed-control", false, () => NatProbeLookup("both"));
 Check("nat-probe-unknown-target-control", false, () => NatProbeLookup("unknown"));
+foreach (var (kind, originalViolation) in NatProbeChecks.Cases)
+    Check("nat-probe-" + kind, originalViolation, () => NatProbeChecks.Run(kind));
 if (results.Count == 0) throw new ArgumentException("No scenarios matched --filter");
 
 var baseline = args.Contains("--baseline");
