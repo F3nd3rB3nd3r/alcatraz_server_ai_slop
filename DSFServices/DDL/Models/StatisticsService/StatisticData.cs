@@ -20,8 +20,9 @@ namespace DSFServices.DDL.Models
 		Add = 0,
 		Sub = 1,
 		Overwrite = 2,
-		ReplaceIfMin = 3,
-		ReplaceIfMax = 4,
+		// Wire IDs from the client's online/statistics.lua.
+		ReplaceIfMax = 3,
+		ReplaceIfMin = 4,
 	};
 
 	public enum RankingOrder
@@ -144,72 +145,55 @@ namespace DSFServices.DDL.Models
 			return true;
 		}
 
-		public bool ReplaceIfMin(StatisticValueVariant newValue)
+		public bool ReplaceIfMin(StatisticValueVariant newValue) => ReplaceNumericBest(newValue, preferHigher: false);
+
+		public bool ReplaceIfMax(StatisticValueVariant newValue) => ReplaceNumericBest(newValue, preferHigher: true);
+
+		private bool ReplaceNumericBest(StatisticValueVariant newValue, bool preferHigher)
 		{
-			// FIXME: might be incorrect and flipped!
-			switch ((VariantType)typeValue)
+			if (!newValue.IsNumeric || double.IsNaN(newValue.GetAsFloat())) return false;
+
+			if (IsNumeric)
 			{
-				case VariantType.int32:
-					if(newValue.valueInt32 < valueInt32)
-                    {
-						valueInt32 = newValue.valueInt32;
-						return true;
-					}
-					break;
-				case VariantType.int64:
-					if (newValue.valueInt64 < valueInt64)
-                    {
-						valueInt64 = newValue.valueInt64;
-						return true;
-					}
-					break;
-				case VariantType.Float:
-				case VariantType.Double:
-					if (newValue.valueDouble < valueDouble)
-                    {
-						valueDouble = newValue.valueDouble;
-						return true;
-					}
-					break;
-				case VariantType.String:
-					// not supported
-					break;
+				if (double.IsNaN(GetAsFloat())) return false;
+				int comparison = newValue.CompareNumeric(this);
+				if (preferHigher ? comparison <= 0 : comparison >= 0) return false;
 			}
-			return false;
+
+			typeValue = newValue.typeValue;
+			Assign(newValue);
+			return true;
 		}
 
-		public bool ReplaceIfMax(StatisticValueVariant newValue)
+		private bool IsNumeric => typeValue >= (byte)VariantType.int32 && typeValue <= (byte)VariantType.Double;
+		private bool IsInteger => typeValue == (byte)VariantType.int32 || typeValue == (byte)VariantType.int64;
+		private long IntegerValue => typeValue == (byte)VariantType.int32 ? valueInt32 : valueInt64;
+
+		// Both operands must be numeric and neither may be NaN.
+		internal int CompareNumeric(StatisticValueVariant other)
 		{
-			// FIXME: might be incorrect and flipped!
-			switch ((VariantType)typeValue)
+			if (IsInteger)
 			{
-				case VariantType.int32:
-					if (newValue.valueInt32 > valueInt32)
-                    {
-						valueInt32 = newValue.valueInt32;
-						return true;
-					}
-					break;
-				case VariantType.int64:
-					if (newValue.valueInt64 > valueInt64)
-                    {
-						valueInt64 = newValue.valueInt64;
-						return true;
-					}
-					break;
-				case VariantType.Float:
-				case VariantType.Double:
-					if (newValue.valueDouble > valueDouble)
-                    {
-						valueDouble = newValue.valueDouble;
-						return true;
-					}
-					break;
-				case VariantType.String:
-					// not supported
-					break;
+				return other.IsInteger
+					? IntegerValue.CompareTo(other.IntegerValue)
+					: CompareIntegerToFloating(IntegerValue, other.valueDouble);
 			}
-			return false;
+
+			return other.IsInteger
+				? -CompareIntegerToFloating(other.IntegerValue, valueDouble)
+				: valueDouble.CompareTo(other.valueDouble);
+		}
+
+		private static int CompareIntegerToFloating(long integer, double floating)
+		{
+			// 2^63 is the first double beyond the long range. Converting a long
+			// to double first would collapse distinct scores above 2^53.
+			const double upperBound = 9223372036854775808d;
+			if (floating >= upperBound) return -1;
+			if (floating < long.MinValue) return 1;
+
+			int comparison = integer.CompareTo((long)floating);
+			return comparison != 0 ? comparison : Math.Truncate(floating).CompareTo(floating);
 		}
 
 		public double GetAsFloat()
@@ -354,6 +338,9 @@ namespace DSFServices.DDL.Models
 
 		public bool UpdateValueWithPolicy(StatisticValueVariant newValue, StatisticPolicy policy)
 		{
+			if (policy == StatisticPolicy.ReplaceIfMin) return value.ReplaceIfMin(newValue);
+			if (policy == StatisticPolicy.ReplaceIfMax) return value.ReplaceIfMax(newValue);
+
 			value.typeValue = newValue.typeValue;
 			switch (policy)
 			{
@@ -363,10 +350,6 @@ namespace DSFServices.DDL.Models
 					return value.Add(newValue);
 				case StatisticPolicy.Sub:
 					return value.Subtract(newValue);
-				case StatisticPolicy.ReplaceIfMin:
-					return value.ReplaceIfMin(newValue);
-				case StatisticPolicy.ReplaceIfMax:
-					return value.ReplaceIfMax(newValue);
 			}
 
 			// scoreLostForNextSlice is diff?
