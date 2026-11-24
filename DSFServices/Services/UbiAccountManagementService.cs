@@ -125,14 +125,15 @@ namespace DSFServices.Services
 		[RMCMethod(11)]
 		public RMCResult LookupPrincipalIds(IEnumerable<string> ubiAccountIds)
 		{
+			var requested = (ubiAccountIds ?? Enumerable.Empty<string>()).Distinct().ToArray();
 			var pids = new Dictionary<string, uint>();
 			using (var db = DBHelper.GetDbContext())
 			{
-				var usersList = db.Users.Where(x => ubiAccountIds.Contains(x.Username)).ToArray();
+				var usersList = db.Users.Where(x => requested.Contains(x.PlayerNickName)).ToArray();
 
 				foreach (var usr in usersList)
 				{
-					pids[usr.Username] = usr.Id;
+					pids[usr.PlayerNickName] = usr.Id;
 				}
 			}
 			return Result(pids);
@@ -141,11 +142,12 @@ namespace DSFServices.Services
 		[RMCMethod(12)]
 		public RMCResult LookupUbiAccountIDsByPids(IEnumerable<uint> pids)
 		{
+			var requested = (pids ?? Enumerable.Empty<uint>()).Distinct().ToArray();
 			var ubiaccountIDs = new Dictionary<uint, string>();
 
 			using (var db = DBHelper.GetDbContext())
 			{
-				var usersList = db.Users.Where(x => pids.Contains(x.Id)).ToArray();
+				var usersList = db.Users.Where(x => requested.Contains(x.Id)).ToArray();
 
 				foreach (var usr in usersList)
 				{
@@ -159,15 +161,16 @@ namespace DSFServices.Services
 		[RMCMethod(13)]
 		public RMCResult LookupUbiAccountIDsByUsernames(IEnumerable<string> Usernames)
 		{
+			var requested = (Usernames ?? Enumerable.Empty<string>()).Distinct().ToArray();
 			var UbiAccountIDs = new Dictionary<string, string>();
 
 			using(var db = DBHelper.GetDbContext())
 			{
-				var usersList = db.Users.Where(x => Usernames.Contains(x.PlayerNickName)).ToArray();
+				var usersList = db.Users.Where(x => requested.Contains(x.PlayerNickName)).ToArray();
 
 				foreach(var usr in usersList)
 				{
-					UbiAccountIDs[usr.Username] = usr.PlayerNickName;
+					UbiAccountIDs[usr.PlayerNickName] = usr.PlayerNickName;
 				}
 			}
 
@@ -177,15 +180,18 @@ namespace DSFServices.Services
 		[RMCMethod(14)]
 		public RMCResult LookupUsernamesByUbiAccountIDs(IEnumerable<string> UbiAccountIds)
 		{
+			var requested = (UbiAccountIds ?? Enumerable.Empty<string>()).Distinct().ToArray();
 			var Usernames = new Dictionary<string, string>();
 
 			using (var db = DBHelper.GetDbContext())
 			{
-				var usersList = db.Users.Where(x => UbiAccountIds.Contains(x.Username)).ToArray();
+				// Custom profiles use the in-game nickname as AccountId as well.
+				// Username is the website login and must not enter this mapping.
+				var usersList = db.Users.Where(x => requested.Contains(x.PlayerNickName)).ToArray();
 
 				foreach (var usr in usersList)
 				{
-					Usernames[usr.Username] = usr.Username;
+					Usernames[usr.PlayerNickName] = usr.PlayerNickName;
 				}
 			}
 
