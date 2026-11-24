@@ -18,3 +18,10 @@ Docker/server/publish/*
 Docker/init-letsencrypt.sh
 data/database.sqlite
 _publish/*
+
+# Generated nested test outputs and private analysis artifacts
+**/bin/
+**/obj/
+artifacts/
+**/_RDV_log.txt
+**/packetLog.bin

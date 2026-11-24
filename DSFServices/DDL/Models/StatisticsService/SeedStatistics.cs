@@ -61,7 +61,7 @@ namespace DSFServices.DDL.Models
 		public static StatisticsBoardValue GetStatisticBoardValueByPropertyId(int boardId, int propertyId)
 		{
 			var statPropertyDesc = AllStatisticDescriptions.FirstOrDefault(x => x.statBoard == boardId && x.statInBoardId == propertyId);
-			return new StatisticsBoardValue(statPropertyDesc);
+			return statPropertyDesc == null ? null : new StatisticsBoardValue(statPropertyDesc);
 		}
 
 		//-----------------------------------------------------------------
