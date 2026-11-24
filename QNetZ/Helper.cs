@@ -47,14 +47,15 @@ namespace QNetZ
 
 		public static ulong ReadU64(Stream s)
 		{
-			return (ulong)((byte)s.ReadByte() |
-						  ((byte)s.ReadByte() << 8) |
-						  ((byte)s.ReadByte() << 16) |
-						  ((byte)s.ReadByte() << 24) |
-						  ((byte)s.ReadByte() << 32) |
-						  ((byte)s.ReadByte() << 40) |
-						  ((byte)s.ReadByte() << 48) |
-						  ((byte)s.ReadByte() << 56));
+			// Widen each byte before shifting: int shifts wrap at 32 bits.
+			return (ulong)(byte)s.ReadByte() |
+						  ((ulong)(byte)s.ReadByte() << 8) |
+						  ((ulong)(byte)s.ReadByte() << 16) |
+						  ((ulong)(byte)s.ReadByte() << 24) |
+						  ((ulong)(byte)s.ReadByte() << 32) |
+						  ((ulong)(byte)s.ReadByte() << 40) |
+						  ((ulong)(byte)s.ReadByte() << 48) |
+						  ((ulong)(byte)s.ReadByte() << 56);
 		}
 
 		public static float ReadFloat(Stream s)
@@ -98,10 +99,10 @@ namespace QNetZ
 			try
 			{
 				ret = new DateTime(
-					(int)((v >> 26) & 2047),
+					checked((int)(v >> 26)),
 					(int)((v >> 22) & 15),
 					(int)((v >> 17) & 31),
-					(int)((v << 12) & 31),
+					(int)((v >> 12) & 31),
 					(int)((v >> 6) & 63),
 					(int)(v & 63));
 			}
@@ -213,10 +214,10 @@ namespace QNetZ
 			ulong value;
 
 			value = (ulong)v.Year << 26;
-			value |= ((ulong)v.Month << 22 & 15);
-			value |= ((ulong)v.Day << 17 & 31);
-			value |= ((ulong)v.Hour << 12 & 31);
-			value |= ((ulong)v.Minute << 6 & 63);
+			value |= ((ulong)v.Month & 15) << 22;
+			value |= ((ulong)v.Day & 31) << 17;
+			value |= ((ulong)v.Hour & 31) << 12;
+			value |= ((ulong)v.Minute & 63) << 6;
 			value |= ((ulong)v.Second & 63);
 
 			WriteU64(s, value);
