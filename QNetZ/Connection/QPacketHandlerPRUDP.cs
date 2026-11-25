@@ -294,7 +294,7 @@ namespace QNetZ
 							}
 
 							// force resend?
-							var cache = GetCachedResponseByRequestPacket(packetIn);
+							var cache = GetCachedResponseByRequestPacket(packetIn, client.Endpoint);
 							if (cache != null)
 							{
 								SendACK(packetIn, client);

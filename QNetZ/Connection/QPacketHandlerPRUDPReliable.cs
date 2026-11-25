@@ -154,7 +154,7 @@ namespace QNetZ
 		}
 
 		// returns response cache list by request packet
-		QReliableResponse GetCachedResponseByRequestPacket(QPacket packet)
+		QReliableResponse GetCachedResponseByRequestPacket(QPacket packet, IPEndPoint endpoint)
 		{
 			if (packet == null)
 				return null;
@@ -180,6 +180,8 @@ namespace QNetZ
 					x.SrcPacket.m_oDestinationVPort == null);
 
 				return CachedResponses.FirstOrDefault(cr =>
+						cr.Endpoint.Equals(endpoint) &&
+						ReferenceEquals(cr.SrcPacket.ResponseCacheIdentity, packet.ResponseCacheIdentity) &&
 						cr.SrcPacket.type == packet.type &&
 						cr.SrcPacket.m_uiSignature == packet.m_uiSignature &&
 						cr.SrcPacket.m_oSourceVPort.type == packet.m_oSourceVPort.type &&
@@ -205,7 +207,9 @@ namespace QNetZ
 			if (responsePacket.flags.Contains(QPacket.PACKETFLAG.FLAG_ACK))
 				return false;
 
-			var cache = GetCachedResponseByRequestPacket(requestPacket);
+			// Server-initiated RMC calls use synthetic request headers shared by
+			// several clients. Never reuse another recipient's destination/cache.
+			var cache = GetCachedResponseByRequestPacket(requestPacket, ep);
 			if (cache == null)
 			{
 				lock (CachedResponses)
