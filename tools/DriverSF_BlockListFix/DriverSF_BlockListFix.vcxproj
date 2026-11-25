@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{DCE982B1-FF4A-403B-B392-D792CA924F47}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType Condition="'$(BlockListSelfTest)'!='true'">DynamicLibrary</ConfigurationType>
+    <ConfigurationType Condition="'$(BlockListSelfTest)'=='true'">Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <MinHookDir>$(ProjectDir)third_party\minhook</MinHookDir>
+    <TargetName>DriverSF_BlockListFix</TargetName>
+    <TargetExt>.asi</TargetExt>
+    <OutDir>$(ProjectDir)..\..\artifacts\driver-block-list-fix\bin\</OutDir>
+    <IntDir>$(ProjectDir)..\..\artifacts\driver-block-list-fix\obj\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(BlockListSelfTest)'=='true'">
+    <TargetName>DriverSF_BlockListChecks</TargetName>
+    <TargetExt>.exe</TargetExt>
+    <IntDir>$(ProjectDir)..\..\artifacts\driver-block-list-fix\test-obj\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MinHookDir)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <Optimization>MaxSpeed</Optimization>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(BlockListSelfTest)'=='true'">
+    <Link><SubSystem>Console</SubSystem></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="DriverSF_BlockListFix.cpp" Condition="'$(BlockListSelfTest)'!='true'" />
+    <ClCompile Include="BlockListChecks.cpp" Condition="'$(BlockListSelfTest)'=='true'" />
+    <ClCompile Include="$(MinHookDir)\src\buffer.c" />
+    <ClCompile Include="$(MinHookDir)\src\hook.c" />
+    <ClCompile Include="$(MinHookDir)\src\trampoline.c" />
+    <ClCompile Include="$(MinHookDir)\src\hde\hde32.c" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
