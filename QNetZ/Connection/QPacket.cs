@@ -96,6 +96,10 @@ namespace QNetZ
 		public bool usesCompression = true;
 		public uint realSize;
 
+		// Internal cache ownership for a server-initiated call. Never serialized;
+		// all fragments of the call keep the same original request object.
+		internal object ResponseCacheIdentity;
+
 		public QPacket()
 		{
 		}

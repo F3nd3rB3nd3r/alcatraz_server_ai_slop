@@ -131,7 +131,7 @@ namespace QNetZ
 
 		public static void SendRMCCall(QPacketHandlerPRUDP handler, QClient client, RMCProtocolId protoId, uint methodId, RMCPRequest requestData)
 		{
-			var packet = new QPacket();
+			var packet = new QPacket { ResponseCacheIdentity = new object() };
 
 			packet.m_oSourceVPort = new QPacket.VPort(0x31);
 			packet.m_oDestinationVPort = new QPacket.VPort(0x3f);
