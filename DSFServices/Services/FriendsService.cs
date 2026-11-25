@@ -1,4 +1,5 @@
 ﻿using Alcatraz.Context.Entities;
+using Alcatraz.Context;
 using DSFServices.DDL.Models;
 using Microsoft.EntityFrameworkCore;
 using QNetZ;
@@ -7,7 +8,6 @@ using QNetZ.DDL;
 using QNetZ.Interfaces;
 using RDVServices;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 
 namespace DSFServices.Services
@@ -18,6 +18,14 @@ namespace DSFServices.Services
 	[RMCService(RMCProtocolId.FriendsService)]
 	public class FriendsService : RMCServiceBase
 	{
+		private const uint Friendship = 1;
+		private const uint PendingFriendship = 3;
+		// The PC queries blocks with wire value 3, which existing databases use for pending friendships.
+		private const uint StoredBlock = 4;
+		private const byte BlockListRelationship = 3;
+		private const int RelationshipPageLimit = 20;
+		private static readonly object RelationshipWrites = new();
+
 		[RMCMethod(1)]
 		public void AddFriend()
 		{
@@ -27,57 +35,49 @@ namespace DSFServices.Services
 		[RMCMethod(2)]
 		public RMCResult AddFriendByName(string strPlayerName, uint uiDetails, string strMessage)
 		{
-			bool result = false;
-			var plInfo = Context.Client.PlayerInfo;
-			var myUserPid = plInfo.PID;
+			var myUserPid = Context.Client.PlayerInfo.PID;
+			uint targetPid;
 
-			using (var db = DBHelper.GetDbContext())
+			lock (RelationshipWrites)
 			{
+				using var db = DBHelper.GetDbContext();
 				var foundUser = db.Users
 					.AsNoTracking()
 					.Where(x => x.Id != myUserPid)
 					.FirstOrDefault(x => x.PlayerNickName == strPlayerName);
+				if (foundUser == null)
+					return Result(new { retVal = false });
 
-				if (foundUser != null)
+				targetPid = foundUser.Id;
+				var hasRelationship = db.UserRelationships.Any(x =>
+					x.User1Id == myUserPid && x.User2Id == targetPid ||
+					x.User1Id == targetPid && x.User2Id == myUserPid);
+				if (hasRelationship)
+					return Result(new { retVal = false });
+
+				db.UserRelationships.Add(new UserRelationship
 				{
-					var existringRequest = db.UserRelationships
-						.FirstOrDefault(x => x.User1Id == myUserPid && x.User2Id == foundUser.Id ||
-											 x.User1Id == foundUser.Id && x.User2Id == myUserPid);
-
-					if(existringRequest != null)
-					{
-						return Result(new { retVal = false });
-					}
-
-					// add new relationship with ID 3
-					db.UserRelationships.Add(new UserRelationship { 
-						Details = uiDetails,
-						User1Id = myUserPid,
-						User2Id = foundUser.Id,
-						ByRelationShip = 3
-					});
-					db.SaveChanges();
-					
-					result = true;
-
-					// send notification
-					var notification = new NotificationEvent(NotificationEventsType.FriendEvent, 0)
-					{
-						m_pidSource = myUserPid,
-						m_uiParam1 = myUserPid,       // i'm just guessing
-						m_uiParam2 = 2,
-						m_strParam = strMessage
-					};
-
-					// send to proper client
-					var qClient = Context.Handler.GetQClientByClientPID(foundUser.Id);
-
-					if(qClient != null)
-						NotificationQueue.SendNotification(Context.Handler, qClient, notification);
-				}
+					Details = uiDetails,
+					User1Id = myUserPid,
+					User2Id = targetPid,
+					ByRelationShip = PendingFriendship
+				});
+				db.SaveChanges();
 			}
 
-			return Result(new { retVal = result });
+			var qClient = Context.Handler.GetQClientByClientPID(targetPid);
+			if (qClient != null)
+			{
+				var notification = new NotificationEvent(NotificationEventsType.FriendEvent, 0)
+				{
+					m_pidSource = myUserPid,
+					m_uiParam1 = myUserPid,
+					m_uiParam2 = 2,
+					m_strParam = strMessage
+				};
+				NotificationQueue.SendNotification(Context.Handler, qClient, notification);
+			}
+			return Result(new { retVal = true });
 		}
 
 		[RMCMethod(3)]
@@ -95,68 +95,55 @@ namespace DSFServices.Services
 		[RMCMethod(5)]
 		public RMCResult AcceptFriendship(uint uiPlayer)
 		{
-			bool result = false;
-			var plInfo = Context.Client.PlayerInfo;
-			var myUserPid = plInfo.PID;
+			var myUserPid = Context.Client.PlayerInfo?.PID ?? 0;
+			if (myUserPid == 0 || uiPlayer == 0 || uiPlayer == myUserPid)
+				return Result(new { retVal = false });
 
-			using (var db = DBHelper.GetDbContext())
+			lock (RelationshipWrites)
 			{
-				var foundUser = db.Users
-					.AsNoTracking()
-					.FirstOrDefault(x => x.Id == uiPlayer);
+				using var db = DBHelper.GetDbContext();
+				var relationship = db.UserRelationships.Find(uiPlayer, myUserPid);
+				if (relationship?.ByRelationShip != PendingFriendship)
+					return Result(new { retVal = relationship?.ByRelationShip == Friendship });
 
-				if (foundUser != null)
-				{
-					var existringRequest = db.UserRelationships
-						.FirstOrDefault(x => x.User1Id == myUserPid && x.User2Id == foundUser.Id ||
-											 x.User1Id == foundUser.Id && x.User2Id == myUserPid);
-
-					if (existringRequest != null)
-					{
-						existringRequest.ByRelationShip = 1;
-						db.SaveChanges();
-					}
-					else
-					{
-						return Result(new { retVal = false });
-					}
-
-					result = true;
-
-					// send notification
-
-					var notification = new NotificationEvent(NotificationEventsType.FriendEvent, 0)
-					{
-						m_pidSource = myUserPid,
-						m_uiParam1 = foundUser.Id,		// i'm just guessing
-						m_uiParam2 = 1
-					};
-
-					// should be that sent to friend too?
-					NotificationQueue.SendNotification(Context.Handler, Context.Client, notification);
-				}
+				relationship.ByRelationShip = Friendship;
+				db.SaveChanges();
 			}
 
-			return Result(new { retVal = result });
+			SendFriendshipAccepted(Context.Client, myUserPid, uiPlayer);
+			var requester = Context.Handler.GetQClientByClientPID(uiPlayer);
+			if (requester?.State == QClient.StateType.Active)
+				SendFriendshipAccepted(requester, myUserPid, myUserPid);
+			return Result(new { retVal = true });
+		}
+
+		private void SendFriendshipAccepted(QClient recipient, uint acceptedBy, uint otherPlayer)
+		{
+			var notification = new NotificationEvent(NotificationEventsType.FriendEvent, 0)
+			{
+				m_pidSource = acceptedBy,
+				m_uiParam1 = otherPlayer,
+				m_uiParam2 = 1
+			};
+			NotificationQueue.SendNotification(Context.Handler, recipient, notification);
 		}
 
 		[RMCMethod(6)]
 		public RMCResult DeclineFriendship(uint uiPlayer)
 		{
-			var plInfo = Context.Client.PlayerInfo;
-			var myUserPid = plInfo.PID;
+			var myUserPid = Context.Client.PlayerInfo?.PID ?? 0;
+			if (myUserPid == 0 || uiPlayer == 0 || uiPlayer == myUserPid)
+				return Result(new { retVal = false });
 
-			// remove relationship from database
-			using (var db = DBHelper.GetDbContext())
+			lock (RelationshipWrites)
 			{
-				var existringRequest = db.UserRelationships
-					.FirstOrDefault(x => x.User1Id == myUserPid && x.User2Id == uiPlayer ||
-										 x.User1Id == uiPlayer && x.User2Id == myUserPid);
-				if(existringRequest != null)
-				{
-					db.UserRelationships.Remove(existringRequest);
-					db.SaveChanges();
-				}
+				using var db = DBHelper.GetDbContext();
+				var relationship = db.UserRelationships.Find(uiPlayer, myUserPid);
+				if (relationship?.ByRelationShip != PendingFriendship)
+					return Result(new { retVal = false });
+
+				db.UserRelationships.Remove(relationship);
+				db.SaveChanges();
 			}
 
 			// send notification
@@ -179,40 +166,80 @@ namespace DSFServices.Services
 		}
 
 		[RMCMethod(7)]
-		public void BlackList()
+		public RMCResult BlackList(uint uiPlayer, uint uiDetails)
 		{
-			UNIMPLEMENTED();
+			var owner = Context.Client.PlayerInfo?.PID ?? 0;
+			if (owner == 0 || uiPlayer == 0 || uiPlayer == owner)
+				return Result(new { retVal = false });
+
+			lock (RelationshipWrites)
+			{
+				using var db = DBHelper.GetDbContext();
+				if (!db.Users.Any(x => x.Id == uiPlayer))
+					return Result(new { retVal = false });
+
+				StoreBlock(db, owner, uiPlayer, uiDetails);
+			}
+			return Result(new { retVal = true });
 		}
 
 		[RMCMethod(8)]
-		public void BlackListByName()
+		public RMCResult BlackListByName(string strPlayerName, uint uiDetails)
 		{
-			UNIMPLEMENTED();
+			var owner = Context.Client.PlayerInfo?.PID ?? 0;
+			if (owner == 0 || string.IsNullOrEmpty(strPlayerName))
+				return Result(new { retVal = false });
+
+			lock (RelationshipWrites)
+			{
+				using var db = DBHelper.GetDbContext();
+				var target = db.Users.Where(x => x.PlayerNickName == strPlayerName)
+					.Select(x => x.Id).FirstOrDefault();
+				if (target == 0 || target == owner)
+					return Result(new { retVal = false });
+
+				StoreBlock(db, owner, target, uiDetails);
+			}
+			return Result(new { retVal = true });
+		}
+
+		private static void StoreBlock(MainDbContext db, uint owner, uint target, uint details)
+		{
+			var pair = db.UserRelationships.Where(x => x.User1Id == owner && x.User2Id == target ||
+				x.User1Id == target && x.User2Id == owner).ToArray();
+			var outgoing = pair.FirstOrDefault(x => x.User1Id == owner);
+			if (outgoing == null)
+			{
+				outgoing = new UserRelationship { User1Id = owner, User2Id = target };
+				db.UserRelationships.Add(outgoing);
+			}
+
+			outgoing.ByRelationShip = StoredBlock;
+			outgoing.Details = details;
+			// A block ends a friendship or request. A block in the other direction stays in place.
+			db.UserRelationships.RemoveRange(pair.Where(x => x.User1Id == target && x.ByRelationShip != StoredBlock));
+			db.SaveChanges();
 		}
 
 		[RMCMethod(9)]
 		public RMCResult ClearRelationship(uint uiPlayer)
 		{
-			bool result = false;
-			var plInfo = Context.Client.PlayerInfo;
-			var myUserPid = plInfo.PID;
+			var myUserPid = Context.Client.PlayerInfo.PID;
 
-			using (var db = DBHelper.GetDbContext())
+			lock (RelationshipWrites)
 			{
-				var existringRequest = db.UserRelationships
-					.FirstOrDefault(x => x.User1Id == myUserPid && x.User2Id == uiPlayer ||
-										 x.User1Id == uiPlayer && x.User2Id == myUserPid);
+				using var db = DBHelper.GetDbContext();
+				var relationship = db.UserRelationships.FirstOrDefault(x =>
+					(x.User1Id == myUserPid && x.User2Id == uiPlayer) ||
+					(x.User1Id == uiPlayer && x.User2Id == myUserPid && x.ByRelationShip != StoredBlock));
+				if (relationship == null)
+					return Result(new { retVal = false });
 
-				if(existringRequest != null)
-				{
-					db.UserRelationships.Remove(existringRequest);
-					db.SaveChanges();
-
-					result = true;
-				}
+				db.UserRelationships.Remove(relationship);
+				db.SaveChanges();
 			}
 
-			return Result(new { retVal = result });
+			return Result(new { retVal = true });
 		}
 
 		[RMCMethod(10)]
@@ -230,123 +257,61 @@ namespace DSFServices.Services
 		[RMCMethod(12)]
 		public RMCResult GetDetailedList(byte byRelationship, bool bReversed)
 		{
-#if false
-			IEnumerable<FriendData> result;
+			// The PC block-list screen requests (3, false). Keep blocks private to their owner.
+			var owner = Context.Client.PlayerInfo?.PID ?? 0;
+			if (owner == 0 || byRelationship != BlockListRelationship || bReversed)
+				return Result(new List<FriendData>());
 
-			var plInfo = Context.Client.Info;
-			var myUserPid = plInfo.PID;
-			
-			using (var db = DBHelper.GetDbContext())
-			{
-				var relations = db.UserRelationships
-					.Include(x => x.User1)
-					.Include(x => x.User2)
-					.AsNoTracking()
-					.Where(x => x.User1Id == myUserPid || x.User2Id == myUserPid)
-					.Where(x => x.ByRelationShip == byRelationship)
-					.Select(x => x.User2Id == myUserPid ?
-						new UserRelationship
-						{  // swap list
-							User1Id = x.User2Id,
-							User1 = x.User2,
-							User2Id = x.User1Id,
-							User2 = x.User1,
-						} : x);
-
-				if (bReversed) // hmmmm
-					relations = relations.Reverse();
-
-				// complete the list
-				result = relations.Select(x =>
-					new FriendData()
-					{
-						m_pid = x.User2Id,
-						m_strName = x.User2.PlayerNickName,
-						m_strStatus = "",
-						m_uiDetails = x.Details,
-						m_byRelationship = (byte)x.ByRelationShip
-					}).ToArray();
-			}
-#else
-			// is that always has to be empty?
-			var result = new List<FriendData>();
-#endif
-			return Result(result);
+			using var db = DBHelper.GetDbContext();
+			var blocks = db.UserRelationships.AsNoTracking()
+				.Where(x => x.User1Id == owner && x.ByRelationShip == StoredBlock)
+				.OrderBy(x => x.User2Id)
+				.Select(x => new FriendData
+				{
+					m_pid = x.User2Id,
+					m_strName = x.User2.PlayerNickName,
+					m_byRelationship = BlockListRelationship,
+					m_uiDetails = x.Details,
+					m_strStatus = ""
+				}).ToList();
+			return Result(blocks);
 		}
 
 		[RMCMethod(13)]
 		public RMCResult GetRelationships(int offset, int size)
 		{
-			var onlinePlayerIds = NetworkPlayers.Players.Select(x => x.PID);
-
-			var result = new RelationshipsResult();
-
+			var onlinePlayerIds = NetworkPlayers.Players.ToArray().Select(x => x.PID).ToArray();
 			var myUserPid = Context.Client.PlayerInfo.PID;
-			using (var db = DBHelper.GetDbContext())
-			{
-				var relations = db.UserRelationships
-					.Include(x => x.User1)
-					.Include(x => x.User2)
-					.AsNoTracking()
-					.Where(x => x.User1Id == myUserPid || x.User2Id == myUserPid);
+			using var db = DBHelper.GetDbContext();
+			var relations = db.UserRelationships.AsNoTracking()
+				.Where(x => (x.User1Id == myUserPid || x.User2Id == myUserPid) && x.ByRelationShip != StoredBlock);
 
-				//result.uiTotalCount = (uint)size;
-				result.uiTotalCount = (uint)relations.Count();
-
-				// do not show sent pending relationships
-				relations = relations.Where(x => !(x.ByRelationShip == 3 && x.User1Id == myUserPid));
-
-				//var relationsPage = relations.OrderBy(x => x.Id).Skip(offset).Take(size).ToList();   // DO NOT apply pagination, it doesn't even work
-
-				// prefer players that currently online
-				// TODO: make a preference in Web UI
-				if (result.uiTotalCount > 16)
+			var total = (uint)relations.Count();
+			// The retail menu reads one 20-row page. Keep incoming invitations ahead of friends.
+			var page = relations
+				.Where(x => !(x.ByRelationShip == PendingFriendship && x.User1Id == myUserPid))
+				.Select(x => new
 				{
-					relations = relations.Where(x => onlinePlayerIds.Contains((x.User1Id == myUserPid) ? x.User2Id : x.User1Id));
-					if(relations.Count() == 0)
-					{
-						result.lstRelationshipsList = new List<RelationshipData>()
-						{
-							new RelationshipData()
-							{
-								m_pid = 1,
-								m_strName = $"{result.uiTotalCount} friends",
-								m_byRelationship = 1,
-								m_byStatus = 0,
-								m_uiDetails = 0
-							},
-							new RelationshipData()
-							{
-								m_pid = 0,
-								m_strName = "Everyone is",
-								m_byRelationship = 1,
-								m_byStatus = 0,
-								m_uiDetails = 0
-							}
-						};
-						return Result(result);
-					}
-				}
-
-				var relationsPage = relations.ToArray();
-
-				result.lstRelationshipsList = relationsPage.Select(x =>
-					{
-						var swap = x.User1Id == myUserPid;
-						var res = new RelationshipData()
-						{
-							m_pid = swap ? x.User2Id : x.User1Id,
-							m_strName = swap ? x.User2.PlayerNickName : x.User1.PlayerNickName,
-							m_byStatus = (byte)(onlinePlayerIds.Contains(swap ? x.User2Id : x.User1Id) ? 1 : 0),
-							m_uiDetails = x.Details,
-							m_byRelationship = (byte)x.ByRelationShip
-						};
-						return res;
-					});
-
-			}
-
-			return Result(result);
+					Pid = x.User1Id == myUserPid ? x.User2Id : x.User1Id,
+					Name = x.User1Id == myUserPid ? x.User2.PlayerNickName : x.User1.PlayerNickName,
+					x.ByRelationShip,
+					x.Details
+				})
+				.Select(x => new { x.Pid, x.Name, x.ByRelationShip, x.Details, Online = onlinePlayerIds.Contains(x.Pid) })
+				.OrderByDescending(x => x.ByRelationShip == PendingFriendship)
+				.ThenByDescending(x => x.ByRelationShip != PendingFriendship && x.Online)
+				.ThenBy(x => x.Pid)
+				.Take(RelationshipPageLimit)
+				.AsEnumerable()
+				.Select(x => new RelationshipData
+				{
+					m_pid = x.Pid,
+					m_strName = x.Name,
+					m_byStatus = (byte)(x.Online ? 1 : 0),
+					m_uiDetails = x.Details,
+					m_byRelationship = (byte)x.ByRelationShip
+				}).ToArray();
+			return Result(new RelationshipsResult { uiTotalCount = total, lstRelationshipsList = page });
 		}
 	}
 }
